@@ -13,38 +13,70 @@ build-type:         Simple
 extra-doc-files:    CHANGELOG.md
 -- extra-source-files:
 
-common warnings
-    ghc-options: -Wall
+common common-options
+    ghc-options:
+        -Wall
+        -Wincomplete-uni-patterns
+        -Wincomplete-record-updates
+        -Wcompat
+        -Widentities
+        -Wredundant-constraints
+        -fhide-source-paths -O2
+
+    default-language:    Haskell2010
+    default-extensions:
+        DeriveGeneric
+        GeneralizedNewtypeDeriving
+        InstanceSigs
+        LambdaCase
+        OverloadedStrings
+        RecordWildCards
+        ScopedTypeVariables
+        StandaloneDeriving
+        TypeApplications
+    build-depends:
+        bytestring
+        , containers
+        , filepath
+        , ghc ^>= 8.10.7
+        , ghc-exactprint
+        , unordered-containers
+        , uniplate >= 1.6  && < 1.7
+        , references
+        , classyplate
+        , aeson
+        , directory
+        , extra
+        , aeson-pretty
+        , base ^>=4.14.3.0
 
 library
-    import:           warnings
-    exposed-modules:  MyLib
+    import:           common-options
+    exposed-modules:  Syn2Chart.Plugin 
     -- other-modules:
     -- other-extensions:
-    build-depends:    base ^>=4.14.3.0
     hs-source-dirs:   src
     default-language: Haskell2010
 
 executable coresyn2chart
-    import:           warnings
+    import:           common-options
     main-is:          Main.hs
     -- other-modules:
     -- other-extensions:
     build-depends:
-        base ^>=4.14.3.0,
         coresyn2chart
 
     hs-source-dirs:   app
     default-language: Haskell2010
 
 test-suite coresyn2chart-test
-    import:           warnings
+    import:           common-options
     default-language: Haskell2010
+    ghc-options: -fplugin=Syn2Chart.Plugin -ddump-simpl
     -- other-modules:
     -- other-extensions:
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Main.hs
     build-depends:
-        base ^>=4.14.3.0,
         coresyn2chart
