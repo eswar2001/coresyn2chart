@@ -45,10 +45,8 @@ buildCfgPass guts = do
             moduleN = moduleNameString $ moduleName $ mg_module guts
             moduleLoc = getFilePath $ mg_loc guts
         res <- translateCoreProgramToCFG binds
-        _ <- foldM (\acc x@(Function name _) -> do
-                _ <- Prelude.writeFile (moduleLoc Prelude.<> "--" Prelude.<> name Prelude.<> ".syn.log") (drawTree $ toDataTree x)
-                pure $ (acc + 1)
-            ) 0 res
+        let tree = foldl (\acc x@(Function name _) -> acc Prelude.<> "\n\n\n\n" Prelude.<> (drawTree $ toDataTree x)) "" res
+        _ <- Prelude.writeFile (moduleLoc Prelude.<> ".syn.log") tree
         _ <- Data.ByteString.Lazy.writeFile (moduleLoc Prelude.<> ".syn.json") (encodePretty res)
         pure ()
     return guts
