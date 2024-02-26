@@ -1,26 +1,33 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE DeriveAnyClass,DeriveDataTypeable #-}
+{-# LANGUAGE FlexibleContexts,BangPatterns,FlexibleInstances,UndecidableInstances #-}
 
 module Syn2Chart.Plugin (plugin) where
 
+import System.Directory
+import System.FilePath
 import Control.Concurrent
+import Control.Monad
 import CoreMonad
-import GhcPlugins
-import qualified Data.Functor
-import Data.List.Extra (nub)
-import Data.Data (toConstr)
+import CoreStats
+import CoreSyn hiding (TB)
 import Data.Aeson
-import Data.Maybe
-import CoreSyn
-import qualified Data.HashMap.Strict as HM
-import Var
-import GHC.Generics (Generic)
-import Module
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.ByteString.Lazy (writeFile)
 import Data.Data
+import Data.List.Extra (nub)
+import Data.Maybe
+import Data.Tree
+import Demand
+import GHC.Generics (Generic)
+import GhcPlugins hiding (TB,(<>))
+import Module
+import Outputable
+import qualified Data.ByteString.Lazy as BS
+import qualified Data.Functor
+import qualified Data.HashMap.Strict as HM
+import qualified Data.Map as Map
+import qualified Data.Text as Text
+import Var
+
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -33,83 +40,73 @@ install _ todos = return (CoreDoPluginPass "CoreSyn2Chart" buildCfgPass  : todos
 
 buildCfgPass :: ModGuts -> CoreM ModGuts
 buildCfgPass guts = do
-    _ <- liftIO $ do
+    _ <- liftIO $ forkIO $ do
         let binds = mg_binds guts
             moduleN = moduleNameString $ moduleName $ mg_module guts
             moduleLoc = getFilePath $ mg_loc guts
         res <- translateCoreProgramToCFG binds
-        print ("generating coresyn json for: " Prelude.<> moduleN)
-        Data.ByteString.Lazy.writeFile (moduleLoc Prelude.<> ".syn.json") $ encodePretty res
+        _ <- foldM (\acc x@(Function name _) -> do
+                _ <- Prelude.writeFile (moduleLoc Prelude.<> "--" Prelude.<> name Prelude.<> ".syn.log") (drawTree $ toDataTree x)
+                pure $ (acc + 1)
+            ) 0 res
+        _ <- Data.ByteString.Lazy.writeFile (moduleLoc Prelude.<> ".syn.json") (encodePretty res)
+        pure ()
     return guts
 
 getFilePath :: SrcSpan -> String
 getFilePath (RealSrcSpan rSSpan) = unpackFS $ srcSpanFile rSSpan
 getFilePath (UnhelpfulSpan fs) =  unpackFS fs
 
-translateCoreProgramToCFG :: [Bind CoreBndr] -> IO [Node]
-translateCoreProgramToCFG r = do
-    res <- mapM translateCoreBindToCFG r
-    pure $ concat res
+data Function = Function String [Function]
+    deriving (Show)
 
-translateCoreBindToCFG :: Bind CoreBndr -> IO [Node]
-translateCoreBindToCFG (NonRec binds expr) = do
-    res <- buildGraph' (Just (nameStableString $ idName binds)) expr
-    pure [res]
-translateCoreBindToCFG (Rec bindings) =
-    mapM (\(name ,body) -> do
-        res <- buildGraph' (Just $ nameStableString $ idName name) body
-        pure $ res
-    ) bindings
+instance ToJSON Function where
+    toJSON (Function name f') = Object $ HM.fromList [(Text.pack name,toJSON f')]
 
-showP :: (Outputable b) => b -> String
-showP = showSDocUnsafe . ppr
+instance Semigroup Function where
+    (Function name1 children1) <> (Function name2 children2) =
+        if name1 == "" || name2 == "" then
+            Function (name1 ++ name2) (children1 Prelude.<> children2)
+        else
+            Function (name1 ++ "__" ++ name2) (children1 Prelude.<> children2)
 
-data CaseAlts = CaseAlts String String Node
-    deriving (Generic,Eq,Data,Show)
+instance Monoid Function where
+    mempty = Function "" []
 
-data Node = LAM String Node | FUNCTION Node Node | CASE Node String [CaseAlts] | END String String | VAR String | LIT String String
-    deriving (Generic,Eq,Data,Show)
+toDataTree :: Function -> Tree String
+toDataTree (Function name children) = Node name (map toDataTree children)
 
-instance ToJSON Node where
-    toJSON (LAM str x) = Object $ HM.fromList ([("constr", (String "lambda")),("name", toJSON str),("body",toJSON x)])
-    toJSON (LAM str x) = Object $ HM.fromList ([("constr", (String "lambda")),("name", toJSON str),("body",toJSON x)])
-    toJSON (FUNCTION node n) = Object $ HM.fromList ([("constr", String "function"),("name", toJSON node),("args",toJSON n)])
-    toJSON (CASE condition _type choices) = Object $ HM.fromList ([("constr", String "case"),("condition", toJSON condition),("_type",toJSON _type),("choices",toJSON choices)])
-    toJSON (VAR name) = toJSON name
-    toJSON (LIT name _type) = Object $ HM.fromList ([("name",toJSON name ),("type", toJSON _type)])
-    toJSON (END str body) = Object $ HM.fromList ([("type", String "END"),("constr", toJSON str),("body", toJSON body)])
+treeToString :: Function -> String
+treeToString (Function name children) = name ++ "\n" ++ concatMap (\child -> "  " ++ treeToString child) children
 
-instance ToJSON CaseAlts where
-    toJSON (CaseAlts val _type exprs) = Object $ HM.fromList ([("value", toJSON val),("name", toJSON _type),("body",toJSON exprs)])
+translateCoreProgramToCFG :: [Bind CoreBndr] -> IO [Function]
+translateCoreProgramToCFG r =
+    pure $ concat $ map countBindings r
 
-buildGraph' :: Maybe String -> Expr CoreBndr -> IO Node
-buildGraph' fName expr =
-    case expr of
-        App fun args -> do
-            let functionName = showP fun
-            __args <- buildGraph' Nothing args
-            f' <- case (show $ toConstr fun,fun) of
-                        ("Var",Var i) -> pure $ VAR $ nameStableString $ idName i
-                        ("Lit",Lit i) -> pure $ LIT (showP i) (showP $ literalType i)
-                        _ -> buildGraph' Nothing args
-            pure (FUNCTION (maybe f' VAR (fName)) __args)
-        Lam b e -> do
-            let functionName = showP b
-            _args <- buildGraph' Nothing e
-            pure $ LAM (fromMaybe functionName fName) _args
-        Let b e -> do
-            let functionName = showP b
-            _args <- buildGraph' Nothing e
-            pure $ LAM (fromMaybe functionName fName) _args
-        Case e b t alts -> do
-            condition <- buildGraph' Nothing e
-            choices <- mapM (\(altcon,b,expr)-> do
-                expr' <- buildGraph' Nothing expr
-                pure $ CaseAlts (showP altcon) (showP b) (expr')
-                ) alts
-            pure $ CASE condition (showP t) choices
-        Var i -> do
-            print (showP $ idType i,idUnique i)
-            pure $ VAR $ nameStableString $ idName i
-        Lit i -> pure $ LIT (showP i) (showP $ literalType i)
-        a -> pure $ END (show $ toConstr a) (showP a)
+getPivotName :: Var -> String
+getPivotName = nameStableString . idName
+
+countFlows :: CoreExpr -> [Function]
+countFlows (Var x) = []
+countFlows (Lit x) = []
+countFlows (Type _) = []
+countFlows (Coercion _) = []
+countFlows (App f a) = countFlows f ++ countFlows a
+countFlows (Lam x e) = countFlows e
+countFlows (Let b e) = countFlows e ++ countBindingsInternal b
+countFlows (Case e x t alts) = (concat (map countAlt alts))
+countFlows (Cast e _) = countFlows e
+countFlows (Tick _ e) = countFlows e
+
+countBindings :: CoreBind -> [Function]
+countBindings (NonRec binds expr) = [Function (getPivotName binds) $ countFlows expr]
+countBindings (Rec bs) =
+    map (\(binds,expr) -> Function (getPivotName binds) $ countFlows expr) bs
+
+countBindingsInternal :: CoreBind -> [Function]
+countBindingsInternal (NonRec binds expr) = countFlows expr
+countBindingsInternal (Rec bs) = concat (map (countFlows . snd) bs)
+
+countAlt :: (AltCon, [Var], CoreExpr) -> [Function]
+countAlt (p, [], e) = [Function ((showSDocUnsafe $ ppr p) Prelude.<> " <<->> " Prelude.<> (showSDocUnsafe $ ppr e) ) $ countFlows e]
+countAlt (p, val, e) = [Function ((showSDocUnsafe $ ppr p) Prelude.<> " <<->> " Prelude.<> (showSDocUnsafe $ ppr val) ) $ countFlows e]

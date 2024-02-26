@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 module Main (main,test,test1,p,p', test2) where
 
 import Control.Monad
@@ -6,10 +7,14 @@ import System.Environment
 
 main :: IO ()
 main = do
-    -- x <- getArgs
-    when (100 > 1) $ putStrLn "aravin"
-        -- print $ test1 0
+    x <- getArgs
+    when ((length x) > 1) $ putStrLn "aravin"
+    print $ test1 0
     if (10 > 200) then putStrLn ("Test suite not yet implemented." <> test1 1000) else putStrLn demo
+    str <- pure $ case length x of
+            0 -> "HI_THERE"
+            _ -> "NOTHING_HERE"
+    print str
     where
         demo :: String
         demo = test 100
@@ -32,8 +37,8 @@ test2 x = case x of
 test1 :: Int -> String
 test1 = test
 
-p :: a -> a -> a -> a -> [a]
+-- p :: a -> a -> a -> a -> [a]
 p a b c d = [a ,b ,c, d]
 
-p' :: a -> a -> a -> a -> a
-p' a b c d = a
+p' :: (Monoid a) => a -> a -> a -> a -> a
+p' a b c d = mempty
