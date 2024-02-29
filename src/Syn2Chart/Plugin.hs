@@ -28,6 +28,7 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.Map as Map
 import qualified Data.Text as Text
 import Var
+import Data.Bool
 
 
 plugin :: Plugin
@@ -86,40 +87,80 @@ translateCoreProgramToCFG r =
     pure $ concat $ map countBindings r
 
 getPivotName :: Var -> String
-getPivotName = nameStableString . idName
+getPivotName var = nameStableString $ idName var
+
+traverseForFlowsWithoutCheck :: CoreExpr -> [Function]
+traverseForFlowsWithoutCheck xx@(Var x) =
+    let name = (getPivotName x)
+    in ([Function name (showSDocUnsafe $ ppr $ tyVarKind x) False []])
+traverseForFlowsWithoutCheck (Lit x) = []
+traverseForFlowsWithoutCheck t@(Type _) = []
+traverseForFlowsWithoutCheck (Coercion _) = []
+traverseForFlowsWithoutCheck x@(App f a) =
+    (let arg = traverseForFlowsWithoutCheck a
+         fun = traverseForFlowsWithoutCheck f
+    in fun ++ arg)
+traverseForFlowsWithoutCheck x@(Lam e a) =
+    let !_ = (getPivotName e)
+    in [Function (getPivotName e) "" False (traverseForFlowsWithoutCheck a)]
+traverseForFlowsWithoutCheck x@(Let b e) = (traverseForFlowsWithoutCheck e ++ countBindingsInternalWithoutCheck b)
+traverseForFlowsWithoutCheck (Case e x t alts) = (concat (map (countAlt t) alts))
+traverseForFlowsWithoutCheck x@(Cast e _) = (traverseForFlowsWithoutCheck e)
+traverseForFlowsWithoutCheck x@(Tick _ e) = (traverseForFlowsWithoutCheck e)
 
 traverseForFlows :: CoreExpr -> [Function]
 traverseForFlows xx@(Var x) =
     let name = (getPivotName x)
-    in [Function name (showSDocUnsafe $ ppr $ tyVarKind x) False []]
+    in ([Function name (showSDocUnsafe $ ppr $ tyVarKind x) False []])
 traverseForFlows (Lit x) = []
 traverseForFlows t@(Type _) = []
 traverseForFlows (Coercion _) = []
-traverseForFlows (App f a) =
-    let arg = traverseForFlows a
-        fun = case traverseForFlows f of
-                [] -> []
-                [(Function name _type isCase [])] -> [Function name _type isCase arg]
-                [(Function name _type isCase x)] -> [Function name _type isCase (arg Prelude.<> x)]
-                x -> x
-    in fun
-traverseForFlows (Lam e a) =
-    let !_ = (getPivotName e)
-    in [Function (getPivotName e) "" False (traverseForFlows a)]
-traverseForFlows (Let b e) = traverseForFlows e ++ countBindingsInternal b
+traverseForFlows x@(App f a) =
+    bool []
+    (let arg = traverseForFlows a
+         fun = traverseForFlows f
+    in fun ++ arg) $ checkForCase x
+traverseForFlows x@(Lam e a) =
+    bool [] [Function (getPivotName e) "" False (traverseForFlows a)] $ checkForCase x
+traverseForFlows x@(Let b e) = bool [] ((traverseForFlows e) ++ countBindingsInternal b) $ checkForCase x
 traverseForFlows (Case e x t alts) = (concat (map (countAlt t) alts))
-traverseForFlows (Cast e _) = traverseForFlows e
-traverseForFlows (Tick _ e) = traverseForFlows e
+traverseForFlows x@(Cast e _) = bool [] (traverseForFlows e) $ checkForCase x
+traverseForFlows x@(Tick _ e) = bool [] (traverseForFlows e) $ checkForCase x
 
 countBindings :: CoreBind -> [Function]
-countBindings (NonRec binds expr) = [Function (getPivotName binds) (showSDocUnsafe $ ppr $ tyVarKind binds) False $ traverseForFlows expr]
+countBindings (NonRec binds expr) =
+  let maybeName = Just (nameStableString $ idName binds)
+  in maybe [] (\name -> [Function name (showSDocUnsafe $ ppr $ tyVarKind binds) False $ traverseForFlows expr]) maybeName
 countBindings (Rec bs) =
-    map (\(binds,expr) -> Function (getPivotName binds) (showSDocUnsafe $ ppr $ tyVarKind binds) False $ traverseForFlows expr) bs
+  mapMaybe (\(binds,expr) ->
+    let maybeName = Just (nameStableString $ idName binds)
+    in maybe Nothing (\name -> Just $ Function name (showSDocUnsafe $ ppr $ tyVarKind binds) False $ traverseForFlows expr) maybeName) bs
+
+countBindingsInternalWithoutCheck :: CoreBind -> [Function]
+countBindingsInternalWithoutCheck (NonRec binds expr) = traverseForFlowsWithoutCheck expr
+countBindingsInternalWithoutCheck (Rec bs) = concat (map (traverseForFlowsWithoutCheck . snd) bs)
 
 countBindingsInternal :: CoreBind -> [Function]
 countBindingsInternal (NonRec binds expr) = traverseForFlows expr
 countBindingsInternal (Rec bs) = concat (map (traverseForFlows . snd) bs)
 
 countAlt :: Type -> (AltCon, [Var], CoreExpr) -> [Function]
-countAlt t (p, [], e) = [Function (showSDocUnsafe $ ppr p) (showSDocUnsafe $ ppr t) True $ traverseForFlows e]
-countAlt t (p, val, e) = [Function ((showSDocUnsafe $ ppr p) Prelude.<> " <<->> " Prelude.<> (showSDocUnsafe $ ppr val)) (showSDocUnsafe $ ppr t) True $ traverseForFlows e]
+countAlt t (p, [], e) = [Function (showSDocUnsafe $ ppr p) (showSDocUnsafe $ ppr t) True $ traverseForFlowsWithoutCheck e]
+countAlt t (p, val, e) = [Function ((showSDocUnsafe $ ppr p) Prelude.<> " <<->> " Prelude.<> (showSDocUnsafe $ ppr val)) (showSDocUnsafe $ ppr t) True $ traverseForFlowsWithoutCheck e]
+
+
+countBindingsInternalBool :: CoreBind -> Bool
+countBindingsInternalBool (NonRec binds expr) = checkForCase expr || checkForCase (Var binds)
+countBindingsInternalBool (Rec bs) = any (==True) (map (\(b,e) -> (checkForCase (Var b) || checkForCase e)) bs)
+
+checkForCase :: CoreExpr -> Bool
+checkForCase xx@(Var x) = False
+checkForCase xx@(Lit x) = False
+checkForCase xx@(Type _) = False
+checkForCase xx@(Coercion _) = False
+checkForCase xx@(App f a) = (checkForCase f || checkForCase a)
+checkForCase xx@(Lam e a) = (checkForCase (Var e) || checkForCase a)
+checkForCase xx@(Let b e) = (checkForCase e || countBindingsInternalBool b)
+checkForCase xx@(Case e x t alts) = True
+checkForCase xx@(Cast e _) = checkForCase e
+checkForCase xx@(Tick _ e) = checkForCase e
