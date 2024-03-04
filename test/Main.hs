@@ -10,10 +10,12 @@ main = do
     x <- getArgs
     when ((length x) > 1) $ putStrLn "aravin"
     print $ test1 0
+    let fun fun1 = fun1 ++ "hello"
     if (10 > 200) then putStrLn ("Test suite not yet implemented." <> test1 1000) else putStrLn demo
     str <- pure $ case length x of
             0 -> "HI_THERE"
             _ -> "NOTHING_HERE"
+    print (fun "12")
     print str
     where
         demo :: String

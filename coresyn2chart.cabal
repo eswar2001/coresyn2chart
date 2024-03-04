@@ -49,7 +49,6 @@ common common-options
         , extra
         , aeson-pretty
         , base ^>=4.14.3.0
-        , monadLib
         , text
 
 library
