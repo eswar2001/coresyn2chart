@@ -49,8 +49,8 @@ common common-options
         , extra
         , aeson-pretty
         , base ^>=4.14.3.0
-        , monadLib
         , text
+        , base64-bytestring
 
 library
     import:           common-options
