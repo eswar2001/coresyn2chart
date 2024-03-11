@@ -42,8 +42,6 @@ common common-options
         , ghc-exactprint
         , unordered-containers
         , uniplate >= 1.6  && < 1.7
-        , references
-        , classyplate
         , aeson
         , directory
         , extra
