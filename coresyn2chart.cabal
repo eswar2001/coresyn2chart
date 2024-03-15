@@ -61,6 +61,7 @@ library
 executable coresyn2chart
     import:           common-options
     main-is:          Main.hs
+    ghc-options: -threaded -rtsopts +RTS -K30000000 -RTS
     -- other-modules:
     -- other-extensions:
     build-depends:

@@ -83,7 +83,7 @@ data LExpr
   | LApp   LExpr LExpr
   | LLam   String LExpr
   | LLet   LBind LExpr
-  | LCase  String String String [LAlt]
+  | LCase  LExpr String String String [LAlt]
   | LUnhandled String String
   -- | LCast  (LExpr) Coercion
   -- | LTick  (Tickish Id) (LExpr)

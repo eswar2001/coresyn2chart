@@ -61,10 +61,23 @@ toLexpr :: (Expr Var) -> LExpr
 toLexpr (Var x)         = LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)
 toLexpr x@(Lit _)       = LLit (showSDocUnsafe $ ppr x)
 toLexpr (Type id)       = LType (showSDocUnsafe $ ppr id)
+toLexpr (App func@(App (App (App (App (Var x) (Type returnType)) inputType) defaultCase) justCase) condition@(App (App _ (Type conditionType)) (Var conditionInput))) = do
+    if ((nameStableString $ idName x) == "$base$Data.Maybe$maybe")
+        then toLexpr $ Case
+                (condition)
+                (conditionInput)
+                (returnType)
+                (
+                    [
+                        ((LitAlt (mkLitString "Nothing")), [], defaultCase)
+                        ,((LitAlt (mkLitString "Just")), [], justCase)
+                    ]
+                )
+        else LApp (toLexpr func) (toLexpr condition)
 toLexpr (App func args) = LApp (toLexpr func) (toLexpr args)
 toLexpr (Lam func args) = LLam (nameStableString (idName func)) (toLexpr args)
 toLexpr (Let func args) = LLet (toLBind func) (toLexpr args)
-toLexpr (Case condition bind _type alts) = LCase (replace "\n" "" $ showSDocUnsafe $ ppr $ condition) (nameStableString (idName bind)) (showSDocUnsafe $ ppr _type) (map toLAlt alts)
+toLexpr (Case condition bind _type alts) = LCase (toLexpr condition) (replace "\n" "" $ showSDocUnsafe $ ppr $ condition) (nameStableString (idName bind)) (showSDocUnsafe $ ppr _type) (map toLAlt alts)
 toLexpr v = LUnhandled (show $ toConstr v) (showSDocUnsafe $ ppr v)
 
 toLAlt :: (AltCon, [Var], CoreExpr) -> (LAltCon, [LExpr], LExpr)
