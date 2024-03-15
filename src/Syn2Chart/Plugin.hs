@@ -1,27 +1,52 @@
-{-# LANGUAGE FlexibleContexts, FlexibleInstances, UndecidableInstances, DeriveDataTypeable, DeriveAnyClass #-}
+{-# LANGUAGE FlexibleContexts, FlexibleInstances, UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# LANGUAGE BangPatterns #-}
 
 module Syn2Chart.Plugin (plugin) where
 
-import Syn2Chart.Types
-import Control.Monad
-import CoreMonad
-import CoreSyn hiding (TB)
-import Data.Aeson
+import Syn2Chart.Types ( LBind(LRec, LNonRec), bindToJSON, LAltCon(..), LExpr(..) )
+import CoreMonad ( liftIO, CoreM, CoreToDo(CoreDoPluginPass) )
+import CoreSyn
+    ( AltCon(..),
+      Expr(Case, Lit, Type, Var, App, Lam, Let),
+      CoreBind,
+      Bind(Rec, NonRec),
+      CoreExpr )
+import Data.Aeson ( ToJSON(toJSON) )
 import Data.Aeson.Encode.Pretty (encodePretty)
-import Data.ByteString.Lazy (writeFile, toStrict,readFile)
-import Data.Data
-import GhcPlugins hiding (TB,(<>))
+import Data.ByteString.Lazy (toStrict)
+import qualified Data.ByteString as DBS
+import Data.Data ( Data(toConstr) )
+import GhcPlugins
+    ( Plugin(installCoreToDos, pluginRecompile),
+      unpackFS,
+      idName,
+      coVarDetails,
+      noCafIdInfo,
+      mkLitString,
+      moduleNameString,
+      mkInternalName,
+      nameStableString,
+      mkVarOcc,
+      showSDocUnsafe,
+      defaultPlugin,
+      purePlugin,
+      noSrcSpan,
+      mkLocalVar,
+      tyVarKind,
+      ModGuts(mg_binds, mg_module, mg_loc),
+      Module(moduleName),
+      Outputable(ppr),
+      CommandLineOption,
+      RealSrcSpan(srcSpanFile),
+      SrcSpan(..), Var )
 import qualified Data.Map as Map
 import Prelude hiding (id)
 import Data.Text.Encoding (decodeUtf8)
 import Data.Text (unpack)
 import Data.List.Extra (replace,intercalate,splitOn)
 import System.Directory (createDirectoryIfMissing)
-import Control.Concurrent
-import Unique
-import TyCoRep
+import Unique ( mkUnique )
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -41,16 +66,12 @@ buildCfgPass opts guts = do
     _ <- liftIO $ do
         let binds = mg_binds guts
             moduleN = moduleNameString $ moduleName $ mg_module guts
-            moduleLoc = prefixPath Prelude.<> (getFilePath $ mg_loc guts)
-        print ("generated coreAST for module: " <> moduleN <> " at path: " <> moduleLoc)
+            moduleLoc = prefixPath Prelude.<> getFilePath (mg_loc guts)
         createDirectoryIfMissing True ((intercalate "/" . reverse . tail . reverse . splitOn "/") moduleLoc)
         !_ <- Prelude.writeFile (moduleLoc Prelude.<> ".ast.show.json")
                 (unpack $ decodeUtf8 $ toStrict $ encodePretty $ Map.fromList (concatMap bindToJSON binds))
-        Data.ByteString.Lazy.writeFile (moduleLoc Prelude.<> ".lbind.ast.show.json") (encodePretty $ map (toJSON . toLBind) binds)
-        -- res <- Data.ByteString.Lazy.readFile (moduleLoc Prelude.<> ".lbind.ast.show.json")
-        -- case eitherDecode $ res of
-        --     Right (_ :: [LBind]) -> print ("generated binds for " Prelude.<> moduleN)
-        --     Left err -> print err
+        DBS.writeFile (moduleLoc Prelude.<> ".lbind.ast.show.json") (toStrict $ encodePretty $ map (toJSON . toLBind) binds)
+        print ("generated coreAST for module: " <> moduleN <> " at path: " <> moduleLoc)
         pure ()
     return guts
 
@@ -58,11 +79,11 @@ getFilePath :: SrcSpan -> String
 getFilePath (RealSrcSpan rSSpan) = unpackFS $ srcSpanFile rSSpan
 getFilePath (UnhelpfulSpan fs) =  unpackFS fs
 
-toLexpr :: (Expr Var) -> LExpr
+toLexpr :: Expr Var -> LExpr
 toLexpr (Var x)         = LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)
 toLexpr x@(Lit _)       = LLit (showSDocUnsafe $ ppr x)
 toLexpr (Type id)       = LType (showSDocUnsafe $ ppr id)
-toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(App _ (Var cFunInput)))) action) = do
+toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(Var cFunInput))) action) =
     if ((nameStableString $ idName x) == "$base$Control.Monad$unless")
         then toLexpr $ Case
                 (condition)
@@ -75,7 +96,7 @@ toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x
                     ]
                 )
         else LApp (toLexpr func) (toLexpr action)
-toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(App _ (Var cFunInput)))) action) = do
+toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(Var cFunInput))) action) =
     if ((nameStableString $ idName x) == "$base$GHC.Base$when")
         then toLexpr $ Case
                 (condition)
@@ -88,33 +109,79 @@ toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x
                     ]
                 )
         else LApp (toLexpr func) (toLexpr action)
-toLexpr (App func@(App (App (App (App (App (Var x) (Type a)) (Type returnType)) _) leftCase) rightCase) condition@(App cFunction (Var cFunInput))) = do
-    let inputVar = mkLocalVar (coVarDetails) (mkInternalName (mkUnique 'y' 0) (mkVarOcc "y") (noSrcSpan)) a (noCafIdInfo)
-    if ((nameStableString $ idName x) == "$base$Data.Either$either")
+toLexpr (App func@(App (App (App (App (App (Var x) (Type a)) (Type returnType)) _) leftCase) rightCase) condition@(Var cFunInput)) = do
+    let inputVar = mkLocalVar coVarDetails (mkInternalName (mkUnique 'y' 0) (mkVarOcc "y") noSrcSpan) a noCafIdInfo
+    if (nameStableString $ idName x) == "$base$Data.Either$either"
+        then toLexpr $ Case
+                condition
+                cFunInput
+                returnType
+                    [
+                        ((LitAlt (mkLitString "Left")), [inputVar], (App leftCase (Var inputVar)))
+                        ,((LitAlt (mkLitString "Right")), [inputVar], (App rightCase (Var inputVar)))
+                    ]
+        else LApp (toLexpr func) (toLexpr condition)
+toLexpr (App func@(App (App (App (App (Var x) (Type returnType)) (Type a)) defaultCase) justCase) condition@(Var conditionInput)) = do
+    let inputVar = mkLocalVar coVarDetails (mkInternalName (mkUnique 'y' 0) (mkVarOcc "y") noSrcSpan) a noCafIdInfo
+    if (nameStableString $ idName x) == "$base$Data.Maybe$maybe"
+        then toLexpr $ Case
+                condition
+                conditionInput
+                returnType
+                    [
+                        ((LitAlt (mkLitString "Nothing")), [], defaultCase)
+                        ,((LitAlt (mkLitString "Just")), [inputVar], (App justCase (Var inputVar)))
+                    ]
+        else LApp (toLexpr func) (toLexpr condition)
+toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(App _ (Var cFunInput)))) action) =
+    if ((nameStableString $ idName x) == "$base$Control.Monad$unless")
         then toLexpr $ Case
                 (condition)
                 (cFunInput)
                 (returnType)
             (
                     [
+                        (DEFAULT, [], pureReturn)
+                        ,((LitAlt (mkLitString "False")), [], action)
+                    ]
+                )
+        else LApp (toLexpr func) (toLexpr action)
+toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(App _ (Var cFunInput)))) action) =
+    if (nameStableString (idName x) == "$base$GHC.Base$when")
+        then toLexpr $ Case
+                (condition)
+                (cFunInput)
+                (returnType)
+            (
+                    [
+                        (DEFAULT, [], pureReturn)
+                        ,((LitAlt (mkLitString "True")), [], action)
+                    ]
+                )
+        else LApp (toLexpr func) (toLexpr action)
+toLexpr (App func@(App (App (App (App (App (Var x) (Type a)) (Type returnType)) _) leftCase) rightCase) condition@(App cFunction (Var cFunInput))) = do
+    let inputVar = mkLocalVar coVarDetails (mkInternalName (mkUnique 'y' 0) (mkVarOcc "y") noSrcSpan) a noCafIdInfo
+    if nameStableString (idName x) == "$base$Data.Either$either"
+        then toLexpr $ Case
+                condition
+                cFunInput
+                returnType
+                    [
                         ((LitAlt (mkLitString "Left")), [inputVar], (App leftCase (Var inputVar)))
                         ,((LitAlt (mkLitString "Right")), [inputVar], (App rightCase (Var inputVar)))
                     ]
-                )
         else LApp (toLexpr func) (toLexpr condition)
-toLexpr (App func@(App (App (App (App (Var x) (Type returnType)) (Type a)) defaultCase) justCase) condition@(App (App _ (Type conditionType)) (Var conditionInput))) = do
-    let inputVar = mkLocalVar (coVarDetails) (mkInternalName (mkUnique 'y' 0) (mkVarOcc "y") (noSrcSpan)) a (noCafIdInfo)
-    if ((nameStableString $ idName x) == "$base$Data.Maybe$maybe")
+toLexpr (App func@(App (App (App (App (Var x) (Type returnType)) (Type a)) defaultCase) justCase) condition@(App _ (Var conditionInput))) = do
+    let inputVar = mkLocalVar coVarDetails (mkInternalName (mkUnique 'y' 0) (mkVarOcc "y") noSrcSpan) a noCafIdInfo
+    if nameStableString (idName x) == "$base$Data.Maybe$maybe"
         then toLexpr $ Case
-                (condition)
-                (conditionInput)
-                (returnType)
-                (
+                condition
+                conditionInput
+                returnType
                     [
                         ((LitAlt (mkLitString "Nothing")), [], defaultCase)
                         ,((LitAlt (mkLitString "Just")), [inputVar], (App justCase (Var inputVar)))
                     ]
-                )
         else LApp (toLexpr func) (toLexpr condition)
 toLexpr (App func args) = LApp (toLexpr func) (toLexpr args)
 toLexpr (Lam func args) = LLam (nameStableString (idName func)) (toLexpr args)
@@ -123,10 +190,10 @@ toLexpr (Case condition bind _type alts) = LCase (toLexpr condition) (replace "\
 toLexpr v = LUnhandled (show $ toConstr v) (showSDocUnsafe $ ppr v)
 
 toLAlt :: (AltCon, [Var], CoreExpr) -> (LAltCon, [LExpr], LExpr)
-toLAlt ((DataAlt dataCon), val, e) = (LDataAlt (showSDocUnsafe $ ppr dataCon), map (\x -> LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)) val, toLexpr e)
-toLAlt ((LitAlt lit), val, e) = (LLitAlt (showSDocUnsafe $ ppr lit), map (\x -> LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)) val, toLexpr e)
+toLAlt (DataAlt dataCon, val, e) = (LDataAlt (showSDocUnsafe $ ppr dataCon), map (\x -> LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)) val, toLexpr e)
+toLAlt (LitAlt lit, val, e) = (LLitAlt (showSDocUnsafe $ ppr lit), map (\x -> LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)) val, toLexpr e)
 toLAlt (DEFAULT, val, e) = (LDEFAULT, map (\x -> LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)) val, toLexpr e)
 
 toLBind :: CoreBind -> LBind
-toLBind (NonRec binder expr) = (LNonRec (nameStableString $ idName binder) (showSDocUnsafe $ ppr $ tyVarKind binder) (toLexpr expr))
-toLBind (Rec binds) = LRec (map (\(b, e) -> (nameStableString (idName b),(showSDocUnsafe $ ppr $ tyVarKind b), toLexpr e)) binds)
+toLBind (NonRec binder expr) = LNonRec (nameStableString $ idName binder) (showSDocUnsafe $ ppr $ tyVarKind binder) (toLexpr expr)
+toLBind (Rec binds) = LRec (map (\(b, e) -> (nameStableString (idName b),showSDocUnsafe $ ppr $ tyVarKind b, toLexpr e)) binds)

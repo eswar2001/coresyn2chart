@@ -1,6 +1,5 @@
 module Syn2Chart.Traversal where
 import Syn2Chart.Types
-import Debug.Trace
 
 translateCoreProgramToCFG :: [LBind] -> [Function]
 translateCoreProgramToCFG = concatMap traverseBindings
@@ -9,8 +8,6 @@ traverseForFlowsLExpr :: LExpr -> [Function] -> [Function]
 traverseForFlowsLExpr (LVar name tykind) argument = [Function name tykind False argument]
 traverseForFlowsLExpr (LLit _) argument = argument
 traverseForFlowsLExpr (LType _) argument = argument
--- traverseForFlowsLExpr (LApp (LApp (LApp (LApp (LApp (LVar "$base$Data.Maybe$maybe" maybeType) returnType) inputType) defaultCase) justCase) (LApp (LApp scrutiny scrutinyType)scrutinyInput )) argument =
---   traverseForFlowsLExpr (LCase (scrutiny) ((show scrutinyInput) ++ " >>= " ++ (show scrutiny)) "" "" [(LDataAlt "Nothing", [], (trace ("zyx " ++ show defaultCase) defaultCase)),(LDataAlt "Just",[LLit "$_in$y"], (LApp ((trace $ "ddd " ++ show justCase) justCase) (LVar "$_in$y" "")))]) (argument)
 traverseForFlowsLExpr (LApp (LVar name _) (LLit x)) argument = [Function name "" False [Function x "" False argument]]
 traverseForFlowsLExpr (LApp (LVar name _) (LVar x _)) argument = [Function name "" False [Function x "" False argument]]
 traverseForFlowsLExpr (LApp (LVar name _) (LType _)) argument = [Function name "" False argument]
@@ -32,8 +29,8 @@ traverseBindings (LRec bs) =
   map (\(name,tyVarK,expr) -> Function name tyVarK False $ traverseForFlowsLExpr expr []) bs
 
 traverseBindingsInternal :: LBind -> [Function] -> [Function]
-traverseBindingsInternal (LNonRec _ tyVarK expr) argument = traverseForFlowsLExpr expr argument
-traverseBindingsInternal (LRec bs) argument = concatMap (\(name,tyVarK,expr) -> traverseForFlowsLExpr expr argument) bs
+traverseBindingsInternal (LNonRec _ _ expr) argument = traverseForFlowsLExpr expr argument
+traverseBindingsInternal (LRec bs) argument = concatMap (\(_,_,expr) -> traverseForFlowsLExpr expr argument) bs
 traverseBindingsInternal LNull argument = argument
 
 countAlt :: String -> (LAltCon, [LExpr], LExpr) -> [Function] -> [Function]

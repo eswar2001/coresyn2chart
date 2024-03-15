@@ -4,10 +4,24 @@ module Syn2Chart.Types where
 
 import GHC.Generics (Generic)
 import qualified Data.HashMap.Strict as HM
-import GhcPlugins hiding (TB,(<>))
+import GhcPlugins
+    ( AltCon(..),
+      Expr(Lam, Lit, Var, Type, App, Let, Case),
+      Var,
+      CoreBind,
+      Bind(Rec, NonRec),
+      idName,
+      nameStableString,
+      showSDocUnsafe,
+      Outputable(ppr) )
 import qualified Data.Map as Map
 import Data.Aeson
-import Data.Data
+    ( FromJSON,
+      ToJSON(toJSON),
+      Value(String, Object),
+      object,
+      KeyValue((.=)) )
+import Data.Data ( Data(toConstr) )
 import Data.Text (pack)
 
 data Function = Function String String Bool [Function]

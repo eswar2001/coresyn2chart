@@ -21,7 +21,7 @@ common common-options
         -Wcompat
         -Widentities
         -Wredundant-constraints
-        -fhide-source-paths -O2
+        -fhide-source-paths -O0
 
     default-language:    Haskell2010
     default-extensions:
@@ -49,6 +49,7 @@ common common-options
         , base ^>=4.14.3.0
         , text
         , base64-bytestring
+        , optparse-applicative
 
 library
     import:           common-options
@@ -73,7 +74,7 @@ executable coresyn2chart
 test-suite coresyn2chart-test
     import:           common-options
     default-language: Haskell2010
-    ghc-options: -fplugin=Syn2Chart.Plugin -fplugin-opt Syn2Chart.Plugin:./tmp/coresyn2chart/
+    ghc-options: -fplugin=Syn2Chart.Plugin -fplugin-opt Syn2Chart.Plugin:./tmp/coresyn2chart/ -ddump-simpl
     -- other-modules:
     -- other-extensions:
     type:             exitcode-stdio-1.0
