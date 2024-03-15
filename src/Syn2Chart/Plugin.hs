@@ -20,7 +20,8 @@ import Data.Text (unpack)
 import Data.List.Extra (replace,intercalate,splitOn)
 import System.Directory (createDirectoryIfMissing)
 import Control.Concurrent
-
+import Unique
+import TyCoRep
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -61,7 +62,48 @@ toLexpr :: (Expr Var) -> LExpr
 toLexpr (Var x)         = LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)
 toLexpr x@(Lit _)       = LLit (showSDocUnsafe $ ppr x)
 toLexpr (Type id)       = LType (showSDocUnsafe $ ppr id)
-toLexpr (App func@(App (App (App (App (Var x) (Type returnType)) inputType) defaultCase) justCase) condition@(App (App _ (Type conditionType)) (Var conditionInput))) = do
+toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(App _ (Var cFunInput)))) action) = do
+    if ((nameStableString $ idName x) == "$base$Control.Monad$unless")
+        then toLexpr $ Case
+                (condition)
+                (cFunInput)
+                (returnType)
+            (
+                    [
+                        (DEFAULT, [], pureReturn)
+                        ,((LitAlt (mkLitString "False")), [], action)
+                    ]
+                )
+        else LApp (toLexpr func) (toLexpr action)
+toLexpr (App func@(App (App (App dollarCode _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(App _ (Var cFunInput)))) action) = do
+    if ((nameStableString $ idName x) == "$base$GHC.Base$when")
+        then toLexpr $ Case
+                (condition)
+                (cFunInput)
+                (returnType)
+            (
+                    [
+                        (DEFAULT, [], pureReturn)
+                        ,((LitAlt (mkLitString "True")), [], action)
+                    ]
+                )
+        else LApp (toLexpr func) (toLexpr action)
+toLexpr (App func@(App (App (App (App (App (Var x) (Type a)) (Type returnType)) _) leftCase) rightCase) condition@(App cFunction (Var cFunInput))) = do
+    let inputVar = mkLocalVar (coVarDetails) (mkInternalName (mkUnique 'y' 0) (mkVarOcc "y") (noSrcSpan)) a (noCafIdInfo)
+    if ((nameStableString $ idName x) == "$base$Data.Either$either")
+        then toLexpr $ Case
+                (condition)
+                (cFunInput)
+                (returnType)
+            (
+                    [
+                        ((LitAlt (mkLitString "Left")), [inputVar], (App leftCase (Var inputVar)))
+                        ,((LitAlt (mkLitString "Right")), [inputVar], (App rightCase (Var inputVar)))
+                    ]
+                )
+        else LApp (toLexpr func) (toLexpr condition)
+toLexpr (App func@(App (App (App (App (Var x) (Type returnType)) (Type a)) defaultCase) justCase) condition@(App (App _ (Type conditionType)) (Var conditionInput))) = do
+    let inputVar = mkLocalVar (coVarDetails) (mkInternalName (mkUnique 'y' 0) (mkVarOcc "y") (noSrcSpan)) a (noCafIdInfo)
     if ((nameStableString $ idName x) == "$base$Data.Maybe$maybe")
         then toLexpr $ Case
                 (condition)
@@ -70,7 +112,7 @@ toLexpr (App func@(App (App (App (App (Var x) (Type returnType)) inputType) defa
                 (
                     [
                         ((LitAlt (mkLitString "Nothing")), [], defaultCase)
-                        ,((LitAlt (mkLitString "Just")), [], justCase)
+                        ,((LitAlt (mkLitString "Just")), [inputVar], (App justCase (Var inputVar)))
                     ]
                 )
         else LApp (toLexpr func) (toLexpr condition)
