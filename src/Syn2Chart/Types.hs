@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, UndecidableInstances, DeriveDataTypeable, DeriveAnyClass #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Syn2Chart.Types where
 
@@ -23,6 +24,7 @@ import Data.Aeson
       KeyValue((.=)) )
 import Data.Data ( Data(toConstr) )
 import Data.Text (pack)
+import Prelude hiding (id)
 
 data Function = Function String String Bool [Function]
     deriving (Show)
@@ -99,9 +101,6 @@ data LExpr
   | LLet   LBind LExpr
   | LCase  LExpr String String String [LAlt]
   | LUnhandled String String
-  -- | LCast  (LExpr) Coercion
-  -- | LTick  (Tickish Id) (LExpr)
-  -- | LCoercion Coercion
   deriving (Generic,Data,Show,ToJSON,FromJSON)
 
 type LAlt = (LAltCon, [LExpr], LExpr)

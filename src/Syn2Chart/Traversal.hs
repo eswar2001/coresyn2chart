@@ -1,5 +1,10 @@
 module Syn2Chart.Traversal where
 import Syn2Chart.Types
+    ( Function(..),
+      LBind(..),
+      LAltCon,
+      LExpr(..),
+      extractNameFromLAltCon )
 
 translateCoreProgramToCFG :: [LBind] -> [Function]
 translateCoreProgramToCFG = concatMap traverseBindings
@@ -19,7 +24,7 @@ traverseForFlowsLExpr (LLam e a) argument = [Function e "" False (traverseForFlo
 traverseForFlowsLExpr (LLet b e) argument =
   let arg = traverseForFlowsLExpr e argument
   in traverseBindingsInternal b arg
-traverseForFlowsLExpr (LCase e pprE _ t alts) argument = [Function pprE t True (concatMap (\x -> countAlt t x argument) alts)]
+traverseForFlowsLExpr (LCase _ pprE _ t alts) argument = [Function pprE t True (concatMap (\x -> countAlt t x argument) alts)]
 traverseForFlowsLExpr (LUnhandled _ _) argument = argument
 
 traverseBindings :: LBind -> [Function]
@@ -27,6 +32,7 @@ traverseBindings (LNonRec name tyVarK expr) =
   [Function name tyVarK False $ traverseForFlowsLExpr expr []]
 traverseBindings (LRec bs) =
   map (\(name,tyVarK,expr) -> Function name tyVarK False $ traverseForFlowsLExpr expr []) bs
+traverseBindings _ = []
 
 traverseBindingsInternal :: LBind -> [Function] -> [Function]
 traverseBindingsInternal (LNonRec _ _ expr) argument = traverseForFlowsLExpr expr argument
@@ -35,4 +41,4 @@ traverseBindingsInternal LNull argument = argument
 
 countAlt :: String -> (LAltCon, [LExpr], LExpr) -> [Function] -> [Function]
 countAlt t (p, [], e) args = [Function (extractNameFromLAltCon p) t True $ traverseForFlowsLExpr e args]
-countAlt t (p, val, e) args = [Function (extractNameFromLAltCon p) t True $ traverseForFlowsLExpr e args]
+countAlt t (p, _, e) args = [Function (extractNameFromLAltCon p) t True $ traverseForFlowsLExpr e args]
