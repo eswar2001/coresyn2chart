@@ -26,13 +26,11 @@ import Data.Data ( Data(toConstr) )
 import Data.Text (pack)
 import Prelude hiding (id)
 
-data Function = Function String String Bool [Function]
+data Function = Function String String Bool [Function] (Maybe String)
     deriving (Show)
 
 instance ToJSON Function where
-    toJSON (Function name _type isCase f') =
-        Object $
-            HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase)]
+    toJSON (Function name _type isCase f' mSrcSpan) = Object $ HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan)]
 
 instance ToJSON Var where
   toJSON var = String $ pack $ nameStableString (idName var)
@@ -93,8 +91,8 @@ data LBind = LNonRec String String LExpr
   deriving (Generic,Data,Show,ToJSON,FromJSON)
 
 data LExpr
-  = LVar   String String
-  | LLit   String
+  = LVar   String String String Bool Bool
+  | LLit   String String Bool
   | LType  String
   | LApp   LExpr LExpr
   | LLam   String LExpr

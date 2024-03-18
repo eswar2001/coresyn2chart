@@ -39,9 +39,7 @@ common common-options
         , containers
         , filepath
         , ghc ^>= 8.10.7
-        , ghc-exactprint
         , unordered-containers
-        , uniplate >= 1.6  && < 1.7
         , aeson
         , directory
         , extra
@@ -50,6 +48,7 @@ common common-options
         , text
         , base64-bytestring
         , optparse-applicative
+        , deepseq
 
 library
     import:           common-options

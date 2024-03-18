@@ -3,7 +3,7 @@ module Main where
 import System.Directory ( doesDirectoryExist, listDirectory, createDirectoryIfMissing , removeFile)
 import System.FilePath ( (</>) )
 import Control.Monad (forM, unless, when)
-import Data.List (isInfixOf, isSuffixOf  )
+import Data.List (isInfixOf, isSuffixOf ,isPrefixOf )
 import Syn2Chart.Types ( LBind, Function(Function) )
 import Data.Aeson ( encode, eitherDecodeStrict )
 import Data.ByteString.Lazy (toStrict)
@@ -72,7 +72,7 @@ cliOptions = CoreSyn2Chart
           ( long "delete-dump"
               <> short 'd'
               <> metavar "Bool"
-              <> value False
+              <> value True
               <> help "delete the existing dump"
           )
 
@@ -123,7 +123,7 @@ main = do
           pathsMvar <- newMVar 0
           convertBindToEdgesList prefixPath bind hmBinds pathsMvar
           paths <- readMVar pathsMvar
-          DBS.appendFile (prefixPath <> "function-flows-cnt.txt") (toStrict $ encode $ "got " <> show paths <>  " paths for the function: " <> x)
+          DBS.appendFile (prefixPath <> "function-flows-cnt.txt") ((toStrict $ encode $ "got " <> show paths <>  " paths for the function: " <> x) <> "\n")
         Nothing -> print ("function not found , can you pick from this file: " <> prefixPath <> "top-lvl-binds.json")
   where
     shouldFilter x =
@@ -146,7 +146,7 @@ processDumpFiles file _ = do
   content <- DBS.readFile file
   case eitherDecodeStrict content of
     Right (binds :: [LBind]) ->
-      mapM (\functionData@(Function _name _type _ _) -> pure (_name,functionData)) (translateCoreProgramToCFG binds)
+      mapM (\functionData@(Function _name _type _ _ _) -> pure (_name,functionData)) (translateCoreProgramToCFG binds)
     Left err -> do
       print err
       print file
@@ -168,7 +168,7 @@ functionsToFilterFromPath (_,True) = True
 functionsToFilterFromPath (name,False) = any (`T.isInfixOf` name) ["$_sys$"]
 
 convertBindToEdgesList :: String -> Function -> HM.HashMap String Function -> MVar Int -> IO ()
-convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren) hmBinds mvar =
+convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren _) hmBinds mvar =
   go [(pack pName,pIsCase)] pChildren []
   where
     go :: [Edge] -> [Function] -> [Function] -> IO ()
@@ -180,12 +180,12 @@ convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren) hmBinds m
         putMVar mvar (l + 1)
     go prev [] futureFunctions = go prev futureFunctions []
     go prev currentNodes futureFunctions =
-      mapM_ (\(Function _name _type isCase childChildren) ->
+      mapM_ (\(Function _name _type isCase childChildren _) ->
         unless (checkForErrorFlows [(pack _name,isCase)]) $ do
           if shouldExpandThese (pack _name,isCase)
             then
               case HM.lookup _name hmBinds of
-                Just (Function __name __type _isCase _childChildren) -> do
+                Just (Function __name __type _isCase _childChildren _) -> do
                   if _name /= pName
                     then go (prev <> [(pack __name,_isCase)]) _childChildren (childChildren <> futureFunctions)
                     else go (prev <> [(pack _name,isCase)]) childChildren futureFunctions

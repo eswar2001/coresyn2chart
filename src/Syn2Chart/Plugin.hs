@@ -1,10 +1,11 @@
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
 
 module Syn2Chart.Plugin (plugin) where
 
-import Syn2Chart.Types ( LBind(LRec, LNonRec), bindToJSON, LAltCon(..), LExpr(..) )
+import Syn2Chart.Types ( LBind(LRec, LNonRec), LAltCon(..), LExpr(..) )
 import CoreMonad ( liftIO, CoreM, CoreToDo(CoreDoPluginPass) )
 import CoreSyn
     ( AltCon(..),
@@ -31,22 +32,24 @@ import GhcPlugins
       showSDocUnsafe,
       defaultPlugin,
       purePlugin,
-      noSrcSpan,
       mkLocalVar,
       tyVarKind,
       ModGuts(mg_binds, mg_module, mg_loc),
       Module(moduleName),
       Outputable(ppr),
-      CommandLineOption,
-      RealSrcSpan(srcSpanFile),
-      SrcSpan(..), Var )
-import qualified Data.Map as Map
+      CommandLineOption, Var, NamedThing (getName), Literal (..), FunctionOrData (..), LitNumType (..) )
 import Prelude hiding (id)
 import Data.Text.Encoding (decodeUtf8)
 import Data.Text (unpack)
 import Data.List.Extra (replace,intercalate,splitOn)
 import System.Directory (createDirectoryIfMissing)
 import Unique ( mkUnique )
+import Name (getSrcSpan)
+import Var (isLocalId)
+import Id (isExportedId)
+import SrcLoc
+import Control.Exception (evaluate)
+import Control.DeepSeq (force)
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -67,21 +70,43 @@ buildCfgPass opts guts = do
         let binds = mg_binds guts
             moduleN = moduleNameString $ moduleName $ mg_module guts
             moduleLoc = prefixPath Prelude.<> getFilePath (mg_loc guts)
-        createDirectoryIfMissing True ((intercalate "/" . init . reverse . splitOn "/") moduleLoc)
-        !_ <- Prelude.writeFile (moduleLoc Prelude.<> ".ast.show.json")
-                (unpack $ decodeUtf8 $ toStrict $ encodePretty $ Map.fromList (concatMap bindToJSON binds))
-        DBS.writeFile (moduleLoc Prelude.<> ".lbind.ast.show.json") (toStrict $ encodePretty $ map (toJSON . toLBind) binds)
-        print ("generated coreAST for module: " <> moduleN <> " at path: " <> moduleLoc)
-        pure ()
+        createDirectoryIfMissing True ((intercalate "/" . reverse . tail . reverse . splitOn "/") moduleLoc)
+        print ("start generating coreAST for module: " <> moduleN <> " at path: " <> moduleLoc,length binds)
+        -- !_ <- Prelude.writeFile (moduleLoc Prelude.<> ".ast.show.json")
+        --         (unpack $ decodeUtf8 $ toStrict $ encodePretty $ Map.fromList (concatMap bindToJSON binds))
+        processedBinds <- evaluate $ force $ map (toJSON . toLBind) binds
+        !_  <- DBS.writeFile (moduleLoc Prelude.<> ".lbind.ast.show.json") (toStrict $ encodePretty $ processedBinds)
+        print ("generated coreAST for module: " <> moduleN <> " at path: " <> moduleLoc,length binds)
     return guts
 
 getFilePath :: SrcSpan -> String
 getFilePath (RealSrcSpan rSSpan) = unpackFS $ srcSpanFile rSSpan
 getFilePath (UnhelpfulSpan fs) =  unpackFS fs
 
+typeOfNumber :: LitNumType -> String
+typeOfNumber LitNumInteger = "LitNumInteger"
+typeOfNumber LitNumNatural = "LitNumNatural"
+typeOfNumber LitNumInt     = "LitNumInt"
+typeOfNumber LitNumInt64   = "LitNumInt64"
+typeOfNumber LitNumWord    = "LitNumWord"
+typeOfNumber LitNumWord64  = "LitNumWord64"
+
+mkLLit :: Literal -> LExpr
+mkLLit (LitChar   char) = LLit "LitChar" [char] False
+mkLLit (LitNumber litNumType val _) = LLit (typeOfNumber litNumType)  (show val) False
+mkLLit (LitString  bs) = LLit "LitString" (unpack $ decodeUtf8 bs) False
+mkLLit LitNullAddr = LLit "LitNullAddr" "" False
+mkLLit LitRubbish = LLit "LitRubbish" "" False
+mkLLit (LitFloat   rational) = LLit "LitFloat" (show rational) False
+mkLLit (LitDouble  rational) = LLit "LitDouble" (show rational) False
+mkLLit (LitLabel   fs _ IsData) = LLit "LitLabel" (unpackFS fs) False
+mkLLit (LitLabel   fs _ IsFunction) = LLit "LitLabel" (unpackFS fs) True
+
+mkLVar x = LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x) ( showSDocUnsafe $ ppr $ getSrcSpan $ getName x) (isLocalId x) (isExportedId x)
+
 toLexpr :: Expr Var -> LExpr
-toLexpr (Var x)         = LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)
-toLexpr x@(Lit _)       = LLit (showSDocUnsafe $ ppr x)
+toLexpr (Var x)         = mkLVar x
+toLexpr (Lit x)       =  mkLLit x
 toLexpr (Type id)       = LType (showSDocUnsafe $ ppr id)
 toLexpr (App func@(App (App (App _ _) pureReturn) (App (App (App (Var x) (Type returnType)) _) condition@(Var cFunInput))) action) =
     case nameStableString (idName x) of
@@ -176,9 +201,9 @@ toLexpr (Case condition bind _type alts) = LCase (toLexpr condition) (replace "\
 toLexpr v = LUnhandled (show $ toConstr v) (showSDocUnsafe $ ppr v)
 
 toLAlt :: (AltCon, [Var], CoreExpr) -> (LAltCon, [LExpr], LExpr)
-toLAlt (DataAlt dataCon, val, e) = (LDataAlt (showSDocUnsafe $ ppr dataCon), map (\x -> LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)) val, toLexpr e)
-toLAlt (LitAlt lit, val, e) = (LLitAlt (showSDocUnsafe $ ppr lit), map (\x -> LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)) val, toLexpr e)
-toLAlt (DEFAULT, val, e) = (LDEFAULT, map (\x -> LVar (nameStableString $ idName x) (showSDocUnsafe $ ppr $ tyVarKind x)) val, toLexpr e)
+toLAlt (DataAlt dataCon, val, e) = (LDataAlt (showSDocUnsafe $ ppr dataCon), map mkLVar val, toLexpr e)
+toLAlt (LitAlt lit, val, e) = (LLitAlt (showSDocUnsafe $ ppr lit), map mkLVar val, toLexpr e)
+toLAlt (DEFAULT, val, e) = (LDEFAULT, map mkLVar val, toLexpr e)
 
 toLBind :: CoreBind -> LBind
 toLBind (NonRec binder expr) = LNonRec (nameStableString $ idName binder) (showSDocUnsafe $ ppr $ tyVarKind binder) (toLexpr expr)
