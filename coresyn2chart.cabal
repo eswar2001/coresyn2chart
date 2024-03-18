@@ -49,6 +49,7 @@ common common-options
         , base64-bytestring
         , optparse-applicative
         , deepseq
+        , time
 
 library
     import:           common-options

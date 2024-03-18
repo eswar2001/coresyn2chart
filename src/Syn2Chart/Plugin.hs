@@ -5,7 +5,7 @@
 
 module Syn2Chart.Plugin (plugin) where
 
-import Syn2Chart.Types ( LBind(LRec, LNonRec), LAltCon(..), LExpr(..) )
+import Syn2Chart.Types ( LBind(LRec, LNonRec), LAltCon(..), LExpr(..), bindToJSON )
 import CoreMonad ( liftIO, CoreM, CoreToDo(CoreDoPluginPass) )
 import CoreSyn
     ( AltCon(..),
@@ -18,6 +18,7 @@ import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.ByteString.Lazy (toStrict)
 import qualified Data.ByteString as DBS
 import Data.Data ( Data(toConstr) )
+import Control.Monad (unless)
 import GhcPlugins
     ( Plugin(installCoreToDos, pluginRecompile),
       unpackFS,
@@ -41,7 +42,9 @@ import GhcPlugins
 import Prelude hiding (id)
 import Data.Text.Encoding (decodeUtf8)
 import Data.Text (unpack)
-import Data.List.Extra (replace,intercalate,splitOn)
+import Data.List.Extra (replace,intercalate,splitOn,isSuffixOf,isInfixOf)
+import Data.Maybe (mapMaybe)
+import qualified Data.Map as Map
 import System.Directory (createDirectoryIfMissing)
 import Unique ( mkUnique )
 import Name (getSrcSpan)
@@ -50,6 +53,7 @@ import Id (isExportedId)
 import SrcLoc
 import Control.Exception (evaluate)
 import Control.DeepSeq (force)
+import Data.Time
 
 plugin :: Plugin
 plugin = defaultPlugin {
@@ -70,13 +74,17 @@ buildCfgPass opts guts = do
         let binds = mg_binds guts
             moduleN = moduleNameString $ moduleName $ mg_module guts
             moduleLoc = prefixPath Prelude.<> getFilePath (mg_loc guts)
-        createDirectoryIfMissing True ((intercalate "/" . reverse . tail . reverse . splitOn "/") moduleLoc)
-        print ("start generating coreAST for module: " <> moduleN <> " at path: " <> moduleLoc,length binds)
         -- !_ <- Prelude.writeFile (moduleLoc Prelude.<> ".ast.show.json")
-        --         (unpack $ decodeUtf8 $ toStrict $ encodePretty $ Map.fromList (concatMap bindToJSON binds))
-        processedBinds <- evaluate $ force $ map (toJSON . toLBind) binds
-        !_  <- DBS.writeFile (moduleLoc Prelude.<> ".lbind.ast.show.json") (toStrict $ encodePretty $ processedBinds)
-        print ("generated coreAST for module: " <> moduleN <> " at path: " <> moduleLoc,length binds)
+        --             (unpack $ decodeUtf8 $ toStrict $ encodePretty $ Map.fromList (concatMap bindToJSON binds))
+        unless ("Types.hs" `isSuffixOf` moduleN || "EC." `isInfixOf` moduleN) $ do
+            createDirectoryIfMissing True ((intercalate "/" . reverse . tail . reverse . splitOn "/") moduleLoc)
+            print ("start generating coreAST for module: " <> moduleN <> " at path: " <> moduleLoc,length binds)
+            t1 <- getCurrentTime
+            processedBinds <- evaluate $ force $ map (toJSON . toLBind) binds
+            t2 <- getCurrentTime 
+            print $ diffUTCTime t2 t1
+            !_  <- DBS.writeFile (moduleLoc Prelude.<> ".lbind.ast.show.json") (toStrict $ encodePretty $ processedBinds)
+            print ("generated coreAST for module: " <> moduleN <> " at path: " <> moduleLoc,length binds)
     return guts
 
 getFilePath :: SrcSpan -> String
@@ -94,7 +102,7 @@ typeOfNumber LitNumWord64  = "LitNumWord64"
 mkLLit :: Literal -> LExpr
 mkLLit (LitChar   char) = LLit "LitChar" [char] False
 mkLLit (LitNumber litNumType val _) = LLit (typeOfNumber litNumType)  (show val) False
-mkLLit (LitString  bs) = LLit "LitString" (unpack $ decodeUtf8 bs) False
+mkLLit (LitString  bs) = LLit "LitString" (show bs) False
 mkLLit LitNullAddr = LLit "LitNullAddr" "" False
 mkLLit LitRubbish = LLit "LitRubbish" "" False
 mkLLit (LitFloat   rational) = LLit "LitFloat" (show rational) False
@@ -196,7 +204,7 @@ toLexpr (App func@(App (App (App (App (Var x) (Type returnType)) (Type a)) defau
         else LApp (toLexpr func) (toLexpr condition)
 toLexpr (App func args) = LApp (toLexpr func) (toLexpr args)
 toLexpr (Lam func args) = LLam (nameStableString (idName func)) (toLexpr args)
-toLexpr (Let func args) = LLet (toLBind func) (toLexpr args)
+toLexpr (Let func args) = LLet (toLBind' func) (toLexpr args)
 toLexpr (Case condition bind _type alts) = LCase (toLexpr condition) (replace "\n" "" $ showSDocUnsafe $ ppr condition) (nameStableString (idName bind)) (showSDocUnsafe $ ppr _type) (map toLAlt alts)
 toLexpr v = LUnhandled (show $ toConstr v) (showSDocUnsafe $ ppr v)
 
@@ -205,6 +213,12 @@ toLAlt (DataAlt dataCon, val, e) = (LDataAlt (showSDocUnsafe $ ppr dataCon), map
 toLAlt (LitAlt lit, val, e) = (LLitAlt (showSDocUnsafe $ ppr lit), map mkLVar val, toLexpr e)
 toLAlt (DEFAULT, val, e) = (LDEFAULT, map mkLVar val, toLexpr e)
 
-toLBind :: CoreBind -> LBind
-toLBind (NonRec binder expr) = LNonRec (nameStableString $ idName binder) (showSDocUnsafe $ ppr $ tyVarKind binder) (toLexpr expr)
-toLBind (Rec binds) = LRec (map (\(b, e) -> (nameStableString (idName b),showSDocUnsafe $ ppr $ tyVarKind b, toLexpr e)) binds)
+shouldFilter x = ("$_in$$" `isInfixOf` x || "$_sys$" `isInfixOf` x || "$$" `isInfixOf` x)
+
+toLBind' :: CoreBind -> LBind
+toLBind' (NonRec binder expr) = LNonRec (nameStableString $ idName binder) (showSDocUnsafe $ ppr $ tyVarKind binder) (toLexpr expr)
+toLBind' (Rec binds) = LRec (mapMaybe (\(b, e) -> if shouldFilter (nameStableString $ idName b) then Nothing else Just $ (nameStableString (idName b),showSDocUnsafe $ ppr $ tyVarKind b, toLexpr e)) binds)
+
+toLBind :: CoreBind -> Maybe LBind
+toLBind (NonRec binder expr) = if shouldFilter (nameStableString $ idName binder) then Nothing else Just $ LNonRec (nameStableString $ idName binder) (showSDocUnsafe $ ppr $ tyVarKind binder) (toLexpr expr)
+toLBind (Rec binds) = Just $ LRec (mapMaybe (\(b, e) -> if shouldFilter (nameStableString $ idName b) then Nothing else Just $ (nameStableString (idName b),showSDocUnsafe $ ppr $ tyVarKind b, toLexpr e)) binds)
