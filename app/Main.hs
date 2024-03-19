@@ -3,7 +3,7 @@ module Main where
 import System.Directory ( doesDirectoryExist, listDirectory, createDirectoryIfMissing , removeFile)
 import System.FilePath ( (</>) )
 import Control.Monad (forM, unless, when)
-import Data.List (isInfixOf, isSuffixOf ,isPrefixOf )
+import Data.List (isSuffixOf ,isPrefixOf )
 import Syn2Chart.Types ( LBind, Function(Function) )
 import Data.Aeson ( encode, eitherDecodeStrict )
 import Data.ByteString.Lazy (toStrict)
@@ -11,7 +11,7 @@ import Syn2Chart.Traversal ( translateCoreProgramToCFG )
 import qualified Data.ByteString.Base64 as BS
 import qualified Data.ByteString as DBS
 import Data.Text.Encoding (decodeUtf8)
-import Data.Text (unpack,Text,pack)
+import Data.Text (unpack,Text,pack,unpack)
 import Control.Exception ( catch, throwIO )
 import System.Directory.Internal.Prelude (isDoesNotExistError)
 import qualified Data.HashMap.Strict as HM
@@ -108,15 +108,15 @@ main = do
 
       print ("No specific function is passed so , generating for all " <> show (Prelude.length (HM.keys hmBinds)) <> "top-level-binds")
       mapM_ (\(name,functionData) -> do
-        print ("processing function: " <> name)
+        print ("processing function: " <> (unpack name))
         DBS.appendFile (prefixPath <> "data-lbind.jsonL") (toStrict (encode functionData) Prelude.<> "\n")
         pathsMvar <- newMVar 0
         convertBindToEdgesList prefixPath functionData hmBinds pathsMvar
         paths <- readMVar pathsMvar
-        DBS.appendFile (prefixPath <> "function-flows-cnt.txt") (toStrict $ encode $ "got " <> show paths <> " paths for the function: " <> name)
+        DBS.appendFile (prefixPath <> "function-flows-cnt.txt") (toStrict $ encode $ "got " <> show paths <> " paths for the function: " <> (unpack name))
         ) (HM.toList hmBinds)
     x ->
-      case HM.lookup x hmBinds of
+      case HM.lookup (pack x) hmBinds of
         Just bind -> do
           print ("processing function: " <> x)
           DBS.appendFile (prefixPath <> "data-lbind.jsonL") (toStrict (encode bind) Prelude.<> "\n")
@@ -128,7 +128,7 @@ main = do
   where
     shouldFilter x =
       let n =  fst x
-      in ("$_in$$" `isInfixOf` n || "$_sys$" `isInfixOf` n || "$$" `isInfixOf` n)
+      in ("$_in$$" `T.isInfixOf` n || "$_sys$" `T.isInfixOf` n || "$$" `T.isInfixOf` n)
 
 getDirectoryContentsRecursive :: FilePath -> IO [FilePath]
 getDirectoryContentsRecursive dir = do
@@ -141,7 +141,7 @@ getDirectoryContentsRecursive dir = do
             else return [path]
     return (concat paths)
 
-processDumpFiles :: String -> String -> IO [(String,Function)]
+processDumpFiles :: String -> String -> IO [(Text,Function)]
 processDumpFiles file _ = do
   content <- DBS.readFile file
   case eitherDecodeStrict content of
@@ -167,9 +167,9 @@ functionsToFilterFromPath :: Edge -> Bool
 functionsToFilterFromPath (_,True) = True
 functionsToFilterFromPath (name,False) = any (`T.isInfixOf` name) ["$_sys$"]
 
-convertBindToEdgesList :: String -> Function -> HM.HashMap String Function -> MVar Int -> IO ()
+convertBindToEdgesList :: String -> Function -> HM.HashMap Text Function -> MVar Int -> IO ()
 convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren _) hmBinds mvar =
-  go [(pack pName,pIsCase)] pChildren []
+  go [(pName,pIsCase)] pChildren []
   where
     go :: [Edge] -> [Function] -> [Function] -> IO ()
     go prev [] [] =
@@ -181,14 +181,14 @@ convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren _) hmBinds
     go prev [] futureFunctions = go prev futureFunctions []
     go prev currentNodes futureFunctions =
       mapM_ (\(Function _name _type isCase childChildren _) ->
-        unless (checkForErrorFlows [(pack _name,isCase)]) $ do
-          if shouldExpandThese (pack _name,isCase)
+        unless (checkForErrorFlows [(_name,isCase)]) $ do
+          if shouldExpandThese (_name,isCase)
             then
               case HM.lookup _name hmBinds of
                 Just (Function __name __type _isCase _childChildren _) -> do
                   if _name /= pName
-                    then go (prev <> [(pack __name,_isCase)]) _childChildren (childChildren <> futureFunctions)
-                    else go (prev <> [(pack _name,isCase)]) childChildren futureFunctions
-                Nothing -> go (prev <> [(pack _name,isCase)]) childChildren futureFunctions
-            else go (prev <> [(pack _name,isCase)]) childChildren futureFunctions
+                    then go (prev <> [(__name,_isCase)]) _childChildren (childChildren <> futureFunctions)
+                    else go (prev <> [(_name,isCase)]) childChildren futureFunctions
+                Nothing -> go (prev <> [(_name,isCase)]) childChildren futureFunctions
+            else go (prev <> [(_name,isCase)]) childChildren futureFunctions
       ) currentNodes

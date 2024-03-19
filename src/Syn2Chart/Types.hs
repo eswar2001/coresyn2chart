@@ -23,10 +23,10 @@ import Data.Aeson
       object,
       KeyValue((.=)) )
 import Data.Data ( Data(toConstr) )
-import Data.Text (pack)
+import Data.Text (pack, Text)
 import Prelude hiding (id)
 
-data Function = Function String String Bool [Function] (Maybe String)
+data Function = Function Text Text Bool [Function] (Maybe Text)
     deriving (Show)
 
 instance ToJSON Function where
@@ -85,39 +85,39 @@ instance ToJSON AltCon where
   toJSON (LitAlt lit) = String (pack $ showSDocUnsafe $ ppr lit)
   toJSON DEFAULT = String "DEFAULT"
 
-data LBind = LNonRec String String LExpr
-            | LRec [(String, String , LExpr)]
+data LBind = LNonRec Text Text LExpr
+            | LRec [(Text, Text , LExpr)]
             | LNull
   deriving (Generic,Data,Show,ToJSON,FromJSON)
 
 data LExpr
-  = LVar   String String String Bool Bool
-  | LLit   String String Bool
-  | LType  String
+  = LVar   Text Text Text Bool Bool
+  | LLit   Text Text Bool
+  | LType  Text
   | LApp   LExpr LExpr
-  | LLam   String LExpr
+  | LLam   Text LExpr
   | LLet   LBind LExpr
-  | LCase  LExpr String String String [LAlt]
-  | LUnhandled String String
+  | LCase  LExpr Text Text Text [LAlt]
+  | LUnhandled Text Text
   deriving (Generic,Data,Show,ToJSON,FromJSON)
 
 type LAlt = (LAltCon, [LExpr], LExpr)
 
 data LAltCon
-  = LDataAlt String
-  | LLitAlt  String
+  = LDataAlt Text
+  | LLitAlt  Text
   | LDEFAULT
   deriving (Generic, Eq, Data,Show,ToJSON,FromJSON)
 
-extractNameFromLAltCon :: LAltCon -> String
+extractNameFromLAltCon :: LAltCon -> Text
 extractNameFromLAltCon (LDataAlt name) = name
 extractNameFromLAltCon (LLitAlt name) = name
 extractNameFromLAltCon LDEFAULT = "DEFAULT"
 
-bindToJSON :: CoreBind -> [(String, Value)]
+bindToJSON :: CoreBind -> [(Text, Value)]
 bindToJSON (NonRec binder ((Lam _ expr))) =
-  [(nameStableString (idName binder), toJSON expr)]
+  [(pack $ nameStableString (idName binder), toJSON expr)]
 bindToJSON (NonRec binder expr) =
-  [(nameStableString (idName binder), toJSON expr)]
+  [(pack $ nameStableString (idName binder), toJSON expr)]
 bindToJSON (Rec binds) =
-  map (\(b, e) -> (nameStableString (idName b), toJSON e)) binds
+  map (\(b, e) -> (pack $ nameStableString (idName b), toJSON e)) binds

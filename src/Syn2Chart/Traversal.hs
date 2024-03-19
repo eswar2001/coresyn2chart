@@ -5,6 +5,7 @@ import Syn2Chart.Types
       LAltCon,
       LExpr(..),
       extractNameFromLAltCon )
+import Data.Text (Text)
 
 translateCoreProgramToCFG :: [LBind] -> [Function]
 translateCoreProgramToCFG = concatMap traverseBindings
@@ -39,7 +40,7 @@ traverseBindingsInternal (LNonRec _ _ expr) argument = traverseForFlowsLExpr exp
 traverseBindingsInternal (LRec bs) argument = concatMap (\(_,_,expr) -> traverseForFlowsLExpr expr argument) bs
 traverseBindingsInternal LNull argument = argument
 
-countAlt :: String -> (LAltCon, [LExpr], LExpr) -> [Function] -> [Function]
+countAlt :: Text -> (LAltCon, [LExpr], LExpr) -> [Function] -> [Function]
 countAlt t (p, [], e) args = [Function (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) Nothing]
 countAlt t (p, [LVar name tykind srcSpan isLocal isExported], e) args = [Function (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) (Just srcSpan)]
 countAlt t (p, (LVar name tykind srcSpan isLocal isExported):xs, e) args = [Function (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) (Just srcSpan) ]
