@@ -25,7 +25,7 @@ traverseForFlowsLExpr (LLam e a) argument = [Function e "" False (traverseForFlo
 traverseForFlowsLExpr (LLet b e) argument =
   let arg = traverseForFlowsLExpr e argument
   in traverseBindingsInternal b arg
-traverseForFlowsLExpr (LCase _ pprE _ t alts) argument = [Function pprE t True (concatMap (\x -> countAlt t x argument) alts) Nothing]
+traverseForFlowsLExpr (LCase _ pprE _ t alts) argument = [CaseFunction pprE t True (concatMap (\x -> countAlt t x argument) alts) Nothing]
 traverseForFlowsLExpr (LUnhandled _ _) argument = argument
 
 traverseBindings :: LBind -> [Function]
@@ -41,7 +41,7 @@ traverseBindingsInternal (LRec bs) argument = concatMap (\(_,_,expr) -> traverse
 traverseBindingsInternal LNull argument = argument
 
 countAlt :: Text -> (LAltCon, [LExpr], LExpr) -> [Function] -> [Function]
-countAlt t (p, [], e) args = [Function (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) Nothing]
-countAlt t (p, [LVar name tykind srcSpan isLocal isExported], e) args = [Function (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) (Just srcSpan)]
-countAlt t (p, (LVar name tykind srcSpan isLocal isExported):xs, e) args = [Function (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) (Just srcSpan) ]
-countAlt t (p, _, e) args = [Function (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) Nothing]
+countAlt t (p, [], e) args = [CaseRelation (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) Nothing]
+countAlt t (p, [LVar name tykind srcSpan isLocal isExported], e) args = [CaseRelation (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) (Just srcSpan)]
+countAlt t (p, (LVar name tykind srcSpan isLocal isExported):xs, e) args = [CaseRelation (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) (Just srcSpan) ]
+countAlt t (p, _, e) args = [CaseRelation (extractNameFromLAltCon p) t True (traverseForFlowsLExpr e args) Nothing]

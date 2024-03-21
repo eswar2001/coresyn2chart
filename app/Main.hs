@@ -3,19 +3,23 @@ module Main where
 import System.Directory ( doesDirectoryExist, listDirectory, createDirectoryIfMissing , removeFile)
 import System.FilePath ( (</>) )
 import Control.Monad (forM, unless, when)
-import Data.List (isSuffixOf ,isPrefixOf )
-import Syn2Chart.Types ( LBind, Function(Function) )
+import Data.List (isSuffixOf )
+import Syn2Chart.Types ( LBind, Function(..) )
 import Data.Aeson ( encode, eitherDecodeStrict )
 import Data.ByteString.Lazy (toStrict)
 import Syn2Chart.Traversal ( translateCoreProgramToCFG )
 import qualified Data.ByteString.Base64 as BS
+import qualified Data.Map as Map
 import qualified Data.ByteString as DBS
-import Data.Text.Encoding (decodeUtf8)
 import Data.Text (unpack,Text,pack,unpack)
-import Control.Exception ( catch, throwIO )
+import Control.Exception ( catch, throwIO , try , SomeException)
 import System.Directory.Internal.Prelude (isDoesNotExistError)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Text as T
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (async, wait)
+import Data.Default (Default (..))
+import Data.Bool (bool)
 import Control.Concurrent.MVar
     ( putMVar, readMVar, takeMVar, newMVar, MVar )
 import Options.Applicative
@@ -35,6 +39,12 @@ import Options.Applicative
       execParser,
       helper,
       Parser )
+import Crypto.Hash
+import Universum (decodeUtf8)
+import Control.Exception.Base (evaluate)
+import Control.DeepSeq (force)
+import Database.Bolt
+import qualified Data.HashSet as HashSet
 
 getBase64FunctionName :: String -> String
 getBase64FunctionName = unpack . decodeUtf8 . BS.encode . toStrict . encode
@@ -62,14 +72,14 @@ cliOptions = CoreSyn2Chart
               <> value "/tmp/coresyn2chart/"
               <> help "path of plugin dump"
             )
-      <*> option auto
+      <*> strOption
           ( long "function"
               <> short 'f'
               <> metavar "STRING"
               <> value "all"
               <> help "which function to process"
           )
-      <*> option auto
+      <*> strOption
           ( long "pattern"
               <> short 'i'
               <> metavar "STRING"
@@ -103,7 +113,7 @@ main = do
   binds <- forM jsonFiles (`processDumpFiles` prefixPath)
 
   let hmBinds = HM.fromList $ filter (not . shouldFilter) $ concat binds
-
+  pipe <- connect $ def { user = "neo4j", password = "" , host = "localhost"  }
   case functionName of
     "all" -> do
       when shouldDeleteDump $ do
@@ -115,25 +125,27 @@ main = do
       print ("created the top-lvl-binds for reference at: " <> prefixPath)
       DBS.writeFile (prefixPath <> "top-lvl-binds.json") (toStrict $ encode $ HM.keys hmBinds)
 
-      print ("No specific function is passed so , generating for all " <> show (Prelude.length (HM.keys hmBinds)) <> "top-level-binds")
+      print ("No specific function is passed so , generating for all " <> show (Prelude.length (HM.keys hmBinds)) <> " top-level-binds")
       mapM_ (\(name,functionData) -> do
         print ("processing function: " <> (unpack name))
         DBS.appendFile (prefixPath <> "data-lbind.jsonL") (toStrict (encode functionData) Prelude.<> "\n")
         pathsMvar <- newMVar 0
-        convertBindToEdgesList prefixPath functionData hmBinds pathsMvar
+        relationsMvar <- newMVar (HashSet.empty)
+        convertBindToEdgesList prefixPath functionData hmBinds pathsMvar pipe relationsMvar
         paths <- readMVar pathsMvar
-        DBS.appendFile (prefixPath <> "function-flows-cnt.txt") (toStrict $ encode $ "got " <> show paths <> " paths for the function: " <> (unpack name) <> "\n")
-        ) (filter (\(k,_) -> (pack functionFilterInfix) `T.isInfixOf` k) $ HM.toList hmBinds)
+        DBS.appendFile (prefixPath <> "function-flows-cnt.txt") ((toStrict $ encode $ "got " <> show paths <> " paths for the function: " <> (unpack name)) <> "\n")
+        ) (filter (\(k,_) -> ((pack functionFilterInfix) `T.isInfixOf` k) && (not $ "cardFingerPrintV2" `T.isInfixOf` k)) $ HM.toList hmBinds)
     x ->
       case HM.lookup (pack x) hmBinds of
         Just bind -> do
           print ("processing function: " <> x)
           DBS.appendFile (prefixPath <> "data-lbind.jsonL") (toStrict (encode bind) Prelude.<> "\n")
           pathsMvar <- newMVar 0
-          convertBindToEdgesList prefixPath bind hmBinds pathsMvar
+          relationsMvar <- newMVar (HashSet.empty)
+          convertBindToEdgesList prefixPath bind hmBinds pathsMvar pipe relationsMvar
           paths <- readMVar pathsMvar
           DBS.appendFile (prefixPath <> "function-flows-cnt.txt") ((toStrict $ encode $ "got " <> show paths <>  " paths for the function: " <> x) <> "\n")
-        Nothing -> print ("function not found , can you pick from this file: " <> prefixPath <> "top-lvl-binds.json")
+        Nothing -> print ("function not found , can you pick from this file: " <> prefixPath <> " top-lvl-binds.json")
   where
     shouldFilter x =
       let n =  fst x
@@ -161,43 +173,133 @@ processDumpFiles file _ = do
       print file
       pure []
 
-type Edge = (Text,Bool)
+type Edge = (Text,Bool,Text)
+data NodeTypes = NFunction | NStartFunction | NEnd
+  deriving (Eq)
+
+instance Show NodeTypes where
+  show (NFunction) = "Function"
+  show (NStartFunction) = "StartFunction"
+  show (NEnd) = "END"
 
 checkForErrorFlows :: [Edge] -> Bool
-checkForErrorFlows = any (\edge -> any (\x -> x `T.isInfixOf` fst edge) errorFlow)
+checkForErrorFlows = any (\(edge,_,_) -> any (`T.isInfixOf` edge) errorFlow)
   where
     errorFlow :: [Text]
-    errorFlow = ["throwException"]
+    errorFlow = ["throwException","handleClientError"]
 
 shouldExpandThese :: Edge -> Bool
-shouldExpandThese (name,_) = not $ any (\(_,func) -> func `T.isInfixOf` name) [("euler-hs" :: [Char],"forkFlow")]
+shouldExpandThese (name,_,_) = not $ any (\(_,func) -> func `T.isInfixOf` name) [("euler-hs" :: [Char],"forkFlow")]
 
 functionsToFilterFromPath :: Edge -> Bool
-functionsToFilterFromPath (_,True) = True
-functionsToFilterFromPath (name,False) = any (`T.isInfixOf` name) ["$_sys$"]
+functionsToFilterFromPath (_,True,_) = True
+functionsToFilterFromPath (name,False,_) = any (`T.isInfixOf` name) ["$_sys$"]
 
-convertBindToEdgesList :: String -> Function -> HM.HashMap Text Function -> MVar Int -> IO ()
-convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren _) hmBinds mvar =
-  go [(pName,pIsCase)] pChildren []
+tryWriteHelper :: FilePath -> DBS.ByteString -> Int -> Int -> IO ()
+tryWriteHelper path content maxRetries currentRetry
+  | currentRetry >= maxRetries = do
+    putStrLn "Maximum retries reached, giving up."
+    print content
+  | otherwise = do
+      res <- try $ DBS.appendFile path content
+      case res of
+        Right _ -> pure () --putStrLn "Write successful."
+        Left (err :: SomeException) -> do
+          putStrLn $ "Attempt " ++ show (currentRetry + 1) ++ " failed: " ++ show err
+          threadDelay 10000
+          tryWriteHelper path content maxRetries (currentRetry + 1)
+
+hashToText :: (Foldable t, Show a) => t a -> Text
+hashToText strs = pack $ show (hash (toStrict $ encode $ concatMap show strs) :: Digest  SHA3_256)
+
+hashToTextText :: Text -> Text
+hashToTextText strs = pack $ show (hash (toStrict $ encode $ strs) :: Digest  SHA3_256)
+
+insertNode :: Pipe -> NodeTypes -> Edge -> Text -> IO ()
+insertNode pipe typeOfNode (name,isCase,uniqueId) context = do
+  let params = Map.fromList [ ("name", T name)
+                , ("isCase", B isCase)
+                , ("uniqueId", T uniqueId)
+                , ("context", T context)
+                ]
+      cypher = "CREATE (n:"<> (pack $ show typeOfNode) <> " {name: $name, isCase: $isCase, uniqueId: $uniqueId, context: $context}) RETURN n"
+  (res :: Either SomeException [Record]) <- try $ run pipe $ queryP cypher params
+  -- either print (\x -> pure ()) res
+  pure ()
+
+createRelationship :: Pipe -> Bool -> Bool -> Edge -> Edge -> Maybe Text -> MVar (HashSet.HashSet Text) -> IO ()
+createRelationship pipe isEnd isStart (pName,pIsCase,uniqueId1) (cName,cIsCase,uniqueId2) mRelation relationsMvar = do
+  let params = Map.fromList [("pName", T pName) , ("pIsCase", B pIsCase) , ("uniqueId1", T uniqueId1), ("cName", T cName) , ("cIsCase", B cIsCase) , ("uniqueId2", T uniqueId2)]
+      prop = "RELATED_TO {edge: " <> maybe "\'NO_MATCH\'" (pack . show) mRelation <> "}"
+      cypher = "MATCH (a:" <> bool (pack $ show NFunction) (pack $ show NStartFunction) isStart <> " {name: $pName, isCase: $pIsCase, uniqueId: $uniqueId1}), (b:" <> bool (pack $ show NFunction) (pack $ show NEnd) isEnd <> " {name: $cName, isCase: $cIsCase, uniqueId: $uniqueId2}) \
+              \WHERE NOT EXISTS((a)-[:" <> prop <> "]->(b)) \
+              \CREATE (a)-[r:" <> prop <> "]->(b) \
+              \RETURN r"
+      cypherText = uniqueId1 <> prop <> uniqueId2
+  l <- takeMVar relationsMvar
+  case HashSet.member cypherText l of
+    False -> do
+      res <- run pipe $ queryP cypher params
+      -- print cypherText
+      putMVar relationsMvar $ HashSet.insert cypherText l
+    True -> do
+      -- print ("duplicate relation",cypherText)
+      putMVar relationsMvar l
+  pure ()
+
+convertBindToEdgesList :: String -> Function -> HM.HashMap Text Function -> MVar Int -> Pipe -> MVar (HashSet.HashSet Text) -> IO ()
+convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren _) hmBinds mvar pipe relationsMvar = do
+  insertNode pipe NStartFunction (pName,pIsCase,pName) ""
+  go True [(pName,pIsCase,pName)] Nothing "" pChildren [] HashSet.empty
   where
-    go :: [Edge] -> [Function] -> [Function] -> IO ()
-    go prev [] [] =
+    go :: Bool -> [Edge] -> Maybe Text -> Text -> [Function] -> [Function] -> HashSet.HashSet Text -> IO ()
+    go isStart prev relation acc [] [] visitedHashSet =
       unless (checkForErrorFlows prev) $ do
+        currentNodeHash <- evaluate $ force $ hashToTextText acc
+        insertNode pipe NEnd ("END",False,currentNodeHash) acc
+        createRelationship pipe True False (last prev) ("END",False,currentNodeHash) relation relationsMvar
         l <- takeMVar mvar
-        print (pName,l)
-        DBS.appendFile (prefixPath <> "data.jsonL") (toStrict $ encode prev Prelude.<> "\n")
+        print (pName,l,(last prev),relation)
+        tryWriteHelper (prefixPath <> "data.jsonL") (toStrict $ encode prev Prelude.<> "\n") 100 0
         putMVar mvar (l + 1)
-    go prev [] futureFunctions = go prev futureFunctions []
-    go prev currentNodes futureFunctions =
-      mapM_ (\(Function _name _type isCase childChildren _) ->
-        unless (checkForErrorFlows [(_name,isCase)]) $ do
-          if shouldExpandThese (_name,isCase)
-            then
-              case HM.lookup _name hmBinds of
-                Just (Function __name __type _isCase _childChildren _) -> do
-                  if _name /= pName
-                    then go (prev <> [(__name,_isCase)]) _childChildren (childChildren <> futureFunctions)
-                    else go (prev <> [(_name,isCase)]) childChildren futureFunctions
-                Nothing -> go (prev <> [(_name,isCase)]) childChildren futureFunctions
-            else go (prev <> [(_name,isCase)]) childChildren futureFunctions
-      ) currentNodes
+    go isStart prev relation acc [] futureFunctions visitedHashSet = go isStart prev relation acc futureFunctions [] visitedHashSet
+    go isStart prev relation acc currentNodes futureFunctions visitedHashSet =
+      mapM_ (\x -> do
+          case x of
+            (Function _name _type isCase childChildren srcSpan) -> do
+              -- print ((last prev),"  ->   ",relation,"  ->   ",_name)
+              currentNodeHash <- evaluate $ force $ hashToText (show prev <> show [(_name,isCase,_name,relation)])
+              if not (checkForErrorFlows [(_name,isCase,currentNodeHash)])
+                then
+                  if shouldExpandThese (_name,isCase,"")
+                      then
+                        case HM.lookup _name hmBinds of
+                          Just (Function __name __type _isCase _childChildren _) -> do
+                            if _name /= pName && (not $ HashSet.member _name visitedHashSet)
+                              then go isStart prev relation (acc <> (pack $ show (_name))) _childChildren (childChildren <> futureFunctions) (HashSet.insert _name visitedHashSet)
+                              else do
+                                print (_name)
+                                go isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
+                          _ -> do
+                            DBS.appendFile (prefixPath <> "data-lbind-rec.jsonL") (toStrict (encode $ _name <> (pack $ show srcSpan)) Prelude.<> "\n")
+                            go isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
+                      else go isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
+                else do
+                  pure ()
+                  -- insertNode pipe NEnd ("ERROR_FLOW",False,"ERROR") acc
+                  -- createRelationship pipe True False (last prev) ("ERROR_FLOW",False,"ERROR") relation
+            (CaseFunction _name _type isCase childChildren _) -> do
+              currentNodeHash <- evaluate $ force $ hashToText (show prev <> show [(_name,isCase,_name,relation)])
+              insertNode pipe NFunction (_name,isCase,currentNodeHash) acc
+              createRelationship pipe False isStart (last prev) (_name,isCase,currentNodeHash) relation relationsMvar
+              -- print ((last prev),relation,(_name,isCase,currentNodeHash))
+              mapM_ (\(CaseRelation __name __type _isCase _childChildren _) -> do
+                  go False (prev <> [(_name,isCase,currentNodeHash)]) (Just (__name <> " :: " <> __type)) "" _childChildren futureFunctions visitedHashSet
+                ) childChildren
+            (CaseRelation _name _type isCase childChildren _) ->
+              when isStart $ do
+                currentNodeHash <- evaluate $ force $ hashToText (show prev <> show [(_name,isCase,_name,relation)])
+                insertNode pipe NFunction (_name,isCase,currentNodeHash) acc
+                createRelationship pipe False isStart (last prev) (_name,isCase,currentNodeHash) relation relationsMvar
+                go False prev Nothing "" childChildren futureFunctions visitedHashSet
+        ) currentNodes

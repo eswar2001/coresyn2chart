@@ -26,11 +26,13 @@ import Data.Data ( Data(toConstr) )
 import Data.Text (pack, Text)
 import Prelude hiding (id)
 
-data Function = Function Text Text Bool [Function] (Maybe Text)
+data Function = Function Text Text Bool [Function] (Maybe Text) |  CaseFunction Text Text Bool [Function] (Maybe Text) | CaseRelation Text Text Bool [Function] (Maybe Text)
     deriving (Show)
 
 instance ToJSON Function where
-    toJSON (Function name _type isCase f' mSrcSpan) = Object $ HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan)]
+    toJSON (Function name _type isCase f' mSrcSpan) = Object $ HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan),("elementType",String "Function")]
+    toJSON (CaseFunction name _type isCase f' mSrcSpan) = Object $ HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan),("elementType",String "CaseFunction")]
+    toJSON (CaseRelation name _type isCase f' mSrcSpan) = Object $ HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan),("elementType",String "CaseRelation")]
 
 instance ToJSON Var where
   toJSON var = String $ pack $ nameStableString (idName var)

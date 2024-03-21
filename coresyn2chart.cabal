@@ -50,7 +50,11 @@ common common-options
         , optparse-applicative
         , deepseq
         , time
-
+        , async
+        , cryptonite
+        , hasbolt
+        , universum
+        , data-default
 library
     import:           common-options
     exposed-modules:  Syn2Chart.Plugin, Syn2Chart.Types, Syn2Chart.Traversal
