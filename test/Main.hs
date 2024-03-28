@@ -1,22 +1,20 @@
 {-# LANGUAGE ConstraintKinds #-}
-module Main (main,demo) where
+module Main (main,demo,c) where
 
 import System.Environment
 
 main :: IO ()
 main = do
     x <- getArgs
-    if (length x == 0) && (length x == 1 || length x == 2) && (length x == 3)
-      then
-        case (length x) of
+    let y = length x
+    case y of
+      0 ->
+        case y of
             0 -> print "$ headMaybe x"
             2 -> putStrLn $ "here_"
             3 -> putStrLn $ "here_"
-            _ -> case headMaybe x of
-                  Just x -> case (length x) + 100 of
-                              100 -> print "100 + $ headMaybe x"
-                  _ -> print "HI"
-      else print "HI"
+            _ -> print "HI"
+      _ -> print "HI"
     --     4 -> putStrLn $ test1 $ test2 (head x)
     --     _ -> putStrLn $ test2 (head $ tail x)
     -- x <- maybe (pure "es") pure ()
@@ -61,8 +59,9 @@ demo Nothing = print "Nothing"
 
 try :: Int -> String
 try 100 = "100"
-try 10 = "00"
-try 1 = "0"
+
+
+c = "HI"
 
 -- -- p :: a -> a -> a -> a -> [a]
 -- p a b c d = [a ,b ,c, d]

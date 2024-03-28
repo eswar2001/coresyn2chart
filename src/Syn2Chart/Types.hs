@@ -21,17 +21,20 @@ import Data.Aeson
       ToJSON(toJSON),
       Value(String, Object),
       object,
-      KeyValue((.=)) )
+      KeyValue((.=)), encode )
 import Data.Data ( Data(toConstr) )
-import Data.Text (pack, Text)
+import Data.Text (pack, Text,isInfixOf)
 import Prelude hiding (id)
+import Crypto.Hash
+import Data.ByteString.Lazy (toStrict)
+import Data.Foldable (foldl')
 
-data Function = Function Text Text Bool [Function] (Maybe Text) |  CaseFunction Text Text Bool [Function] (Maybe Text) | CaseRelation Text Text Bool [Function] (Maybe Text)
+data Function = Function Text Text Bool [Function] (Maybe Text) |  CaseFunction Text (Maybe CaseExtract) Text Text Bool [Function] (Maybe Text) | CaseRelation Text Text Bool [Function] (Maybe Text)
     deriving (Show)
 
 instance ToJSON Function where
     toJSON (Function name _type isCase f' mSrcSpan) = Object $ HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan),("elementType",String "Function")]
-    toJSON (CaseFunction name _type isCase f' mSrcSpan) = Object $ HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan),("elementType",String "CaseFunction")]
+    toJSON (CaseFunction id caseExtract name _type isCase f' mSrcSpan) = Object $ HM.fromList [("id",toJSON id),("id",toJSON caseExtract),("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan),("elementType",String "CaseFunction")]
     toJSON (CaseRelation name _type isCase f' mSrcSpan) = Object $ HM.fromList [("name",toJSON name),("body",toJSON f'),("type",toJSON _type),("isCase",toJSON isCase),("srcSpan", toJSON mSrcSpan),("elementType",String "CaseRelation")]
 
 instance ToJSON Var where
@@ -92,6 +95,42 @@ data LBind = LNonRec Text Text LExpr
             | LNull
   deriving (Generic,Data,Show,ToJSON,FromJSON)
 
+class (ToJSON t) => HashGenerator t where
+    generateHash :: t -> Text
+
+data CaseExtract
+  = GetField Text Text Text Text
+  | AppOnVar Text Text Text
+  | OnField Text Text Text
+  | AppOnField Text Text Text Text
+  | AppAppOnField Text Text Text Text Text Text
+  | AppOnGetField Text Text CaseExtract
+  | MaybeOrEitherOnGetField Text Text Text CaseExtract
+    deriving (Generic,Data,Show,ToJSON,FromJSON)
+
+instance HashGenerator CaseExtract where
+    generateHash (OnField fieldName fieldType renamerfieldName) =
+      let k = case fieldType of
+                "Text" -> fieldName
+                "String" -> fieldName
+                "Bool" -> fieldName
+                "Int" -> fieldName
+                "Maybe Text" -> fieldName
+                "Maybe String" -> fieldName
+                "Maybe Bool" -> fieldName
+                "Maybe Int" -> fieldName
+                "$_sys$wild" -> renamerfieldName
+                _ -> fieldType
+      in pack $ show (hash (toStrict $ encode (toJSON k)) :: Digest  SHA3_256)
+    generateHash (AppOnField functionName outputType fieldName inputType) =
+      let isInputGeneric = foldl' (\acc x -> acc || (x `isInfixOf` inputType && not ("Either" `isInfixOf` outputType))) False ["Text","String","Bool","Int"]
+          isOutputGeneric = foldl' (\acc x -> acc || (x `isInfixOf` outputType && not ("Either" `isInfixOf` outputType))) False ["Text","String","Bool","Int"]
+          k = if isInputGeneric && isOutputGeneric 
+                then toJSON $ AppOnField functionName outputType fieldName inputType
+                else toJSON $ AppOnField functionName outputType "fieldName" inputType
+      in pack $ show (hash (toStrict $ encode k) :: Digest  SHA3_256)
+    generateHash strs = pack $ show (hash (toStrict $ encode (toJSON strs)) :: Digest  SHA3_256)
+
 data LExpr
   = LVar   Text Text Text Bool Bool
   | LLit   Text Text Bool
@@ -99,7 +138,7 @@ data LExpr
   | LApp   LExpr LExpr
   | LLam   Text LExpr
   | LLet   LBind LExpr
-  | LCase  LExpr Text Text Text [LAlt]
+  | LCase  Text (Maybe CaseExtract) LExpr Text Text Text [LAlt]
   | LUnhandled Text Text
   deriving (Generic,Data,Show,ToJSON,FromJSON)
 

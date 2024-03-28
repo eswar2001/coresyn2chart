@@ -4,7 +4,7 @@ import System.Directory ( doesDirectoryExist, listDirectory, createDirectoryIfMi
 import System.FilePath ( (</>) )
 import Control.Monad (forM, unless, when)
 import Data.List (isSuffixOf )
-import Syn2Chart.Types ( LBind, Function(..) )
+import Syn2Chart.Types ( LBind, Function(..),CaseExtract(..),generateHash)
 import Data.Aeson ( encode, eitherDecodeStrict )
 import Data.ByteString.Lazy (toStrict)
 import Syn2Chart.Traversal ( translateCoreProgramToCFG )
@@ -250,24 +250,23 @@ createRelationship pipe isEnd isStart (pName,pIsCase,uniqueId1) (cName,cIsCase,u
 convertBindToEdgesList :: String -> Function -> HM.HashMap Text Function -> MVar Int -> Pipe -> MVar (HashSet.HashSet Text) -> IO ()
 convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren _) hmBinds mvar pipe relationsMvar = do
   insertNode pipe NStartFunction (pName,pIsCase,pName) ""
-  go True [(pName,pIsCase,pName)] Nothing "" pChildren [] HashSet.empty
+  go "" HM.empty True [(pName,pIsCase,pName)] Nothing "" pChildren [] HashSet.empty
   where
-    go :: Bool -> [Edge] -> Maybe Text -> Text -> [Function] -> [Function] -> HashSet.HashSet Text -> IO ()
-    go isStart prev relation acc [] [] visitedHashSet =
+    go :: Text -> HM.HashMap Text Text -> Bool -> [Edge] -> Maybe Text -> Text -> [Function] -> [Function] -> HashSet.HashSet Text -> IO ()
+    go dump caseMemory isStart prev relation acc [] [] visitedHashSet =
       unless (checkForErrorFlows prev) $ do
         currentNodeHash <- evaluate $ force $ hashToTextText acc
         insertNode pipe NEnd ("END",False,currentNodeHash) acc
         createRelationship pipe True False (last prev) ("END",False,currentNodeHash) relation relationsMvar
         l <- takeMVar mvar
-        print (pName,l,(last prev),relation)
+        print (l,hashToTextText dump)
         tryWriteHelper (prefixPath <> "data.jsonL") (toStrict $ encode prev Prelude.<> "\n") 100 0
         putMVar mvar (l + 1)
-    go isStart prev relation acc [] futureFunctions visitedHashSet = go isStart prev relation acc futureFunctions [] visitedHashSet
-    go isStart prev relation acc currentNodes futureFunctions visitedHashSet =
+    go dump caseMemory isStart prev relation acc [] futureFunctions visitedHashSet = go dump caseMemory isStart prev relation acc futureFunctions [] visitedHashSet
+    go dump caseMemory isStart prev relation acc currentNodes futureFunctions visitedHashSet = do
       mapM_ (\x -> do
           case x of
             (Function _name _type isCase childChildren srcSpan) -> do
-              -- print ((last prev),"  ->   ",relation,"  ->   ",_name)
               currentNodeHash <- evaluate $ force $ hashToText (show prev <> show [(_name,isCase,_name,relation)])
               if not (checkForErrorFlows [(_name,isCase,currentNodeHash)])
                 then
@@ -276,30 +275,48 @@ convertBindToEdgesList prefixPath (Function pName _ pIsCase pChildren _) hmBinds
                         case HM.lookup _name hmBinds of
                           Just (Function __name __type _isCase _childChildren _) -> do
                             if _name /= pName && (not $ HashSet.member _name visitedHashSet)
-                              then go isStart prev relation (acc <> (pack $ show (_name))) _childChildren (childChildren <> futureFunctions) (HashSet.insert _name visitedHashSet)
+                              then go (dump <> "("<>"FUNCTION___" <> _name <> "__SRCSPAN" <> (pack $ show srcSpan) <>")") caseMemory isStart prev relation (acc <> (pack $ show (_name))) _childChildren (childChildren <> futureFunctions) (HashSet.insert _name visitedHashSet)
                               else do
-                                print (_name)
-                                go isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
+                                go (dump <> "("<>"FUNCTION___" <> _name <> "__SRCSPAN" <> (pack $ show srcSpan) <>")") caseMemory isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
                           _ -> do
-                            DBS.appendFile (prefixPath <> "data-lbind-rec.jsonL") (toStrict (encode $ _name <> (pack $ show srcSpan)) Prelude.<> "\n")
-                            go isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
-                      else go isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
+                            DBS.appendFile (prefixPath <> "data-lbind-rec.jsonL") (toStrict (encode $ _name <> ((pack $ show srcSpan))) Prelude.<> "\n")
+                            go (dump <> "("<>"FUNCTION___" <> _name <> "__SRCSPAN" <> (pack $ show srcSpan) <>")") caseMemory isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
+                      else go (dump <> "("<>"FUNCTION___" <> _name <> "__SRCSPAN" <> (pack $ show srcSpan) <>")") caseMemory isStart prev relation (acc <> (pack $ show (_name))) childChildren futureFunctions (visitedHashSet)
                 else do
                   pure ()
-                  -- insertNode pipe NEnd ("ERROR_FLOW",False,"ERROR") acc
-                  -- createRelationship pipe True False (last prev) ("ERROR_FLOW",False,"ERROR") relation
-            (CaseFunction _name _type isCase childChildren _) -> do
-              currentNodeHash <- evaluate $ force $ hashToText (show prev <> show [(_name,isCase,_name,relation)])
+            (CaseFunction _id caseExtract _name _type isCase childChildren _) -> do
+              currentNodeHash <- evaluate $ force $ pack $ show _id
               insertNode pipe NFunction (_name,isCase,currentNodeHash) acc
               createRelationship pipe False isStart (last prev) (_name,isCase,currentNodeHash) relation relationsMvar
-              -- print ((last prev),relation,(_name,isCase,currentNodeHash))
-              mapM_ (\(CaseRelation __name __type _isCase _childChildren _) -> do
-                  go False (prev <> [(_name,isCase,currentNodeHash)]) (Just (__name <> " :: " <> __type)) "" _childChildren futureFunctions visitedHashSet
-                ) childChildren
-            (CaseRelation _name _type isCase childChildren _) ->
-              when isStart $ do
-                currentNodeHash <- evaluate $ force $ hashToText (show prev <> show [(_name,isCase,_name,relation)])
-                insertNode pipe NFunction (_name,isCase,currentNodeHash) acc
-                createRelationship pipe False isStart (last prev) (_name,isCase,currentNodeHash) relation relationsMvar
-                go False prev Nothing "" childChildren futureFunctions visitedHashSet
+              mPrevRelation <- pure $ checkAndReturnIfInCaseMemory caseMemory caseExtract
+              case mPrevRelation of
+                Just prevRelation -> do
+                  mapM_ (\(CaseRelation __name __type _isCase _childChildren _) -> do
+                      currentPathHash <- evaluate $ force $ hashToTextText $ dump <> "CASE__" <> _name <> " -> __RELATION__ " <> __name <> " FOUND ,"
+                      l <- takeMVar relationsMvar
+                      if (prevRelation == __name && (not $ HashSet.member currentPathHash l))
+                        then do
+                          putMVar relationsMvar $ HashSet.insert currentPathHash l
+                          go (dump <> "CASE__" <> _name <> " -> __RELATION__ " <> __name <> " FOUND ,") caseMemory False (prev <> [(_name,isCase,currentNodeHash)]) (Just (__name <> " :: " <> __type)) "" _childChildren futureFunctions (HashSet.insert currentPathHash visitedHashSet)
+                        else putMVar relationsMvar l
+                    ) childChildren
+                Nothing ->
+                  mapM_ (\(CaseRelation __name __type _isCase _childChildren _) -> do
+                      currentPathHash <- evaluate $ force $ hashToTextText $ (dump <> "CASE__" <> _name <> " -> __RELATION__ " <> __name <> "," <> "adding **("<> (pack $ show (caseExtract,__name,__type)) <>")**")
+                      l <- takeMVar relationsMvar
+                      if (not $ HashSet.member currentPathHash l)
+                        then do
+                          putMVar relationsMvar $ HashSet.insert currentPathHash l
+                          go (dump <> "CASE__" <> _name <> " -> __RELATION__ " <> __name <> "," <> "adding **("<> (pack $ show (caseExtract,__name,__type)) <>")**") (addToCaseMemory caseMemory caseExtract __name __type) False (prev <> [(_name,isCase,currentNodeHash)]) (Just (__name <> " :: " <> __type)) "" _childChildren futureFunctions ((HashSet.insert currentPathHash visitedHashSet))
+                        else putMVar relationsMvar l
+                    ) childChildren
         ) currentNodes
+
+checkAndReturnIfInCaseMemory :: HM.HashMap Text Text -> Maybe CaseExtract -> Maybe Text
+checkAndReturnIfInCaseMemory caseMemory (Just key) = HM.lookup (generateHash key) caseMemory
+checkAndReturnIfInCaseMemory  _ _ = Nothing
+
+addToCaseMemory :: HM.HashMap Text Text -> Maybe CaseExtract -> Text -> Text -> HM.HashMap Text Text
+addToCaseMemory caseMemory (Just key) relationName relationType
+  = HM.insert (generateHash key) (relationName) caseMemory
+addToCaseMemory hm _ _ _ = hm
